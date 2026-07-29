@@ -4,6 +4,16 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": null,
-  "lessons": []
+  "updatedAt": "2026-07-29T09:51:24+09:00",
+  "lessons": [
+    {
+      "day": 1,
+      "week": 1,
+      "title": "process, fd, socket, client/server",
+      "summary": "Process가 file descriptor와 kernel socket을 통해 peer application까지 byte를 전달하는 전체 경로를 학습합니다.",
+      "path": "day-01.html",
+      "kind": "lesson",
+      "publishedAt": "2026-07-29T09:51:24+09:00"
+    }
+  ]
 }
