@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 02</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr>
+      <td align="center" style="padding:20px 10px;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+          <tr>
+            <td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+              <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 1 / DAY 02</div>
+              <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">byte → segment → packet → frame</h1>
+              <p style="margin:0;color:#d5edf7;font-size:16px;">캡슐화와 역캡슐화를 상태 소유권으로 이해하기 · 예상 학습 30분 + 실습 30분</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:26px;">
+              <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+                <strong style="color:#075985;">한 줄 요약</strong><br>
+                Application의 byte는 TCP·IP·link 계층을 내려가며 각 계층이 책임질 header를 덧붙이고, 수신 측은 식별자와 checksum을 검증하며 반대 순서로 벗긴다. 같은 데이터라도 계층마다 이름·주소·수명·실패 원인이 다르다.
+              </div>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;width:30%;font-weight:700;vertical-align:top;">Byte / octet</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">8bit 묶음. IETF 문서에서는 8bit임을 분명히 하려고 octet이라는 표현을 자주 쓴다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Payload</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">현재 계층이 운반하는 내용. TCP header 뒤 application data는 TCP payload이고, TCP segment 전체는 IP 입장에서는 payload다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Header</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">해당 계층이 처리에 필요한 제어 정보. TCP port·sequence, IP address·hop limit, Ethernet MAC·EtherType 등이 들어간다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">TCP segment</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">TCP header와 TCP가 운반하는 user data의 조합. TCP는 application byte stream의 신뢰성·순서·흐름을 관리한다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">IP packet</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">IP header와 payload의 조합. RFC 8200은 IPv6 packet을 IPv6 header와 payload라고 정의한다. IPv4에서는 datagram이라는 표현도 널리 쓴다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Ethernet frame</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">한 link에서 전달되는 MAC header·payload·FCS의 묶음. Router를 통과하면 다음 link에 맞는 새 frame이 만들어진다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">MTU / MSS</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">MTU는 한 link가 운반할 수 있는 IP packet 크기 상한이고, TCP MSS는 TCP header를 제외한 한 segment의 data 크기 상한이다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Encapsulation</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">상위 계층 데이터를 payload로 삼아 현재 계층의 header를 붙이는 과정. 단순 포장보다 “책임과 식별자를 추가한다”는 의미가 중요하다.</td></tr>
+              </table>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+              <p>실무 장애는 “네트워크가 안 된다”라는 한 문장으로 시작하지만 원인은 서로 다른 계층에 있다.</p>
+              <ul style="padding-left:22px;">
+                <li>Application은 정상 응답을 만들었지만 TCP connection이 reset될 수 있다.</li>
+                <li>TCP는 정상인데 IP route가 없어 packet이 출발하지 못할 수 있다.</li>
+                <li>IP 목적지는 맞지만 현재 hop의 MAC address를 찾지 못해 frame을 만들지 못할 수 있다.</li>
+                <li>Packet이 MTU보다 커서 fragmentation 또는 drop이 발생할 수 있다.</li>
+                <li>Packet capture 위치와 NIC offload 때문에 실제 wire와 다른 크기의 “가상 segment”가 보일 수 있다.</li>
+              </ul>
+              <p>계층마다 상태의 소유자가 다르므로, 증거도 다른 곳에서 수집해야 한다. Process·socket은 <code>ss</code>와 application log, route는 <code>ip route</code>, neighbor는 <code>ip neigh</code>, 실제 header는 <code>tcpdump</code>나 Wireshark로 본다.</p>
+              <div style="background:#fff7e6;border:1px solid #f0cf88;padding:15px 17px;margin:18px 0;">
+                <strong>핵심 구분:</strong> 한 번의 <code>send()</code>가 한 TCP segment가 되는 것도 아니고, 한 TCP segment가 항상 한 application message인 것도 아니다. TCP가 보존하는 것은 message 경계가 아니라 순서 있는 byte stream이다.
+              </div>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 송신 흐름</h2>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:separate;border-spacing:0 6px;">
+                <tr><td style="background:#082f49;color:#fff;text-align:center;padding:13px;border-radius:8px;"><strong>① Application byte stream</strong><br><span style="font-size:14px;color:#d5edf7;">HTTP body, Kafka request, DB protocol bytes</span></td></tr>
+                <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ socket API · file descriptor</td></tr>
+                <tr><td style="background:#eaf7fc;text-align:center;padding:13px;border:1px solid #9ed7e2;border-radius:8px;"><strong>② TCP segment</strong><br><span style="font-size:14px;">source/destination port · sequence · ACK · flags · window + data</span></td></tr>
+                <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ transport payload</td></tr>
+                <tr><td style="background:#eef2ff;text-align:center;padding:13px;border:1px solid #c7d2fe;border-radius:8px;"><strong>③ IP packet</strong><br><span style="font-size:14px;">source/destination IP · protocol/next header · TTL/hop limit + TCP segment</span></td></tr>
+                <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ route lookup · next-hop resolution</td></tr>
+                <tr><td style="background:#edf8f2;text-align:center;padding:13px;border:1px solid #a8d8bd;border-radius:8px;"><strong>④ Ethernet frame</strong><br><span style="font-size:14px;">destination/source MAC · EtherType + IP packet + FCS</span></td></tr>
+                <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ NIC · link</td></tr>
+                <tr><td style="background:#f7fafb;text-align:center;padding:13px;border:1px solid #cbd8de;border-radius:8px;"><strong>⑤ Physical signal</strong><br><span style="font-size:14px;">전기·광·무선 신호로 다음 hop까지 전달</span></td></tr>
+              </table>
+
+              <h3 style="font-size:18px;margin:24px 0 8px;color:#075985;">송신 측 번호별 상태 변화</h3>
+              <ol style="padding-left:22px;">
+                <li>Process가 socket file descriptor에 byte를 쓴다. Kernel은 TCP send buffer에 수용할 수 있는지 확인한다. <code>send()</code> 성공은 peer application 처리 완료가 아니라 local kernel이 데이터를 받아들였다는 뜻에 가깝다.</li>
+                <li>TCP는 byte에 sequence number를 부여하고 현재 MSS·congestion window·receiver window·Nagle/offload 조건에 따라 전송 단위를 결정한다. Application의 write 크기와 segment 크기는 독립적이다.</li>
+                <li>IP는 source/destination address와 upper-layer protocol 식별자를 붙이고 route table에서 egress interface와 next hop을 고른다.</li>
+                <li>Link 계층은 next hop의 MAC address를 ARP 또는 IPv6 Neighbor Discovery로 알아낸 후, 해당 link에서만 유효한 frame을 만든다.</li>
+                <li>NIC가 checksum·segmentation offload를 수행할 수 있다. 그래서 host의 capture에는 MTU보다 큰 TCP 덩어리가 보이지만 wire에서는 여러 frame일 수 있다.</li>
+              </ol>
+
+              <h3 style="font-size:18px;margin:24px 0 8px;color:#075985;">수신 측 역캡슐화</h3>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:18%;font-weight:700;vertical-align:top;">1. NIC/link</td><td style="padding:10px;border:1px solid #dbe3e8;">Frame 목적지와 FCS를 검사하고 EtherType으로 상위 protocol을 선택한다.</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">2. IP</td><td style="padding:10px;border:1px solid #dbe3e8;">목적지 IP, header, hop limit과 extension header를 처리하고 protocol/Next Header로 TCP module에 넘긴다.</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">3. TCP</td><td style="padding:10px;border:1px solid #dbe3e8;">4-tuple과 connection state를 찾고 checksum·sequence·window를 검사한다. Out-of-order data는 재정렬하고 중복은 제거한다.</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#edf8f2;font-weight:700;vertical-align:top;">4. Socket</td><td style="padding:10px;border:1px solid #dbe3e8;">연속된 byte를 receive buffer에 넣고 blocked process를 깨운다. Application은 <code>read()</code> 한 번에 message 하나가 온다고 가정하면 안 된다.</td></tr>
+              </table>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+              <h3 style="font-size:18px;color:#075985;">상태의 소유자와 불변식</h3>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+                <tr><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">계층</th><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">주요 상태</th><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">핵심 불변식</th></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">Application</td><td style="padding:10px;border:1px solid #dbe3e8;">message framing, business request ID, deadline</td><td style="padding:10px;border:1px solid #dbe3e8;">byte stream에서 message 경계를 복원할 수 있어야 한다.</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">TCP</td><td style="padding:10px;border:1px solid #dbe3e8;">4-tuple, sequence/ACK, send·receive window, retransmission queue</td><td style="padding:10px;border:1px solid #dbe3e8;">Application에 중복 없는 순서 있는 byte stream을 제공한다.</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">IP</td><td style="padding:10px;border:1px solid #dbe3e8;">source/destination address, route, TTL/hop limit, PMTU</td><td style="padding:10px;border:1px solid #dbe3e8;">각 packet을 독립적으로 다음 hop에 전달한다. 신뢰성·순서는 보장하지 않는다.</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">Link</td><td style="padding:10px;border:1px solid #dbe3e8;">MAC, EtherType, VLAN, FCS, neighbor</td><td style="padding:10px;border:1px solid #dbe3e8;">한 link에서 next hop까지 frame을 운반한다.</td></tr>
+              </table>
+
+              <h3 style="font-size:18px;color:#075985;">Router를 지날 때 무엇이 바뀌는가</h3>
+              <p>일반적인 NAT 없는 경로를 가정하면 source/destination IP와 TCP port는 end-to-end로 유지된다. 하지만 router는 들어온 Ethernet frame을 그대로 전달하지 않는다.</p>
+              <ol style="padding-left:22px;">
+                <li>Ingress frame의 link header와 FCS를 검사하고 벗긴다.</li>
+                <li>IP packet의 destination을 route table에서 lookup하고 TTL 또는 hop limit을 1 줄인다.</li>
+                <li>다음 hop과 egress link에 맞는 새 source/destination MAC으로 새 frame을 만든다.</li>
+              </ol>
+              <p>NAT, proxy, tunnel, load balancer가 있으면 IP·port 또는 encapsulation 계층이 추가로 바뀔 수 있다. “어떤 값이 유지된다”는 답은 middlebox와 관측 위치를 명시해야 정확하다.</p>
+
+              <h3 style="font-size:18px;color:#075985;">크기 계산 예시</h3>
+              <p>Option·VLAN·tunnel·offload가 없고 application data가 1,000byte라고 가정한다.</p>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+                <tr><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">단계</th><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">IPv4 최소 header 기준</th><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">IPv6 최소 header 기준</th></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">TCP segment</td><td style="padding:10px;border:1px solid #dbe3e8;">20 + 1,000 = 1,020byte</td><td style="padding:10px;border:1px solid #dbe3e8;">20 + 1,000 = 1,020byte</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">IP packet</td><td style="padding:10px;border:1px solid #dbe3e8;">20 + 1,020 = 1,040byte</td><td style="padding:10px;border:1px solid #dbe3e8;">40 + 1,020 = 1,060byte</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">Ethernet frame</td><td style="padding:10px;border:1px solid #dbe3e8;">14 + 1,040 + 4 FCS = 1,058byte</td><td style="padding:10px;border:1px solid #dbe3e8;">14 + 1,060 + 4 FCS = 1,078byte</td></tr>
+              </table>
+              <p style="font-size:14px;color:#52636d;">Preamble, inter-frame gap, VLAN tag, TCP option, IPv6 extension header와 tunnel header는 위 계산에 없다. 실제 bandwidth 산정에서는 wire overhead를 별도로 포함한다.</p>
+
+              <h3 style="font-size:18px;color:#075985;">MTU, MSS, fragmentation</h3>
+              <ul style="padding-left:22px;">
+                <li>Ethernet MTU가 1,500byte라면 최소 IPv4+TCP header 기준 TCP MSS의 흔한 값은 1,460byte다.</li>
+                <li>IPv6는 기본 header가 40byte이므로 최소 TCP header 기준 1,440byte가 된다.</li>
+                <li>TCP는 보통 MSS와 Path MTU Discovery를 이용해 IP fragmentation을 피한다.</li>
+                <li>Tunnel·VPN·overlay가 header를 추가하면 effective MTU가 줄어든다. 이를 반영하지 않으면 큰 packet만 사라지는 black-hole 증상이 생길 수 있다.</li>
+                <li>IPv6 router는 transit packet을 fragment하지 않는다. Source가 Path MTU에 맞춰 packet 크기를 조절해야 한다.</li>
+              </ul>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 Best Practice</h2>
+              <ul style="padding-left:22px;">
+                <li><strong>Application framing을 명시한다.</strong> Length-prefix, delimiter, fixed-size, HTTP Content-Length처럼 byte stream에서 message를 복원할 규칙이 필요하다.</li>
+                <li><strong>End-to-end deadline과 transport timeout을 구분한다.</strong> TCP ACK는 peer kernel 수신일 뿐 business transaction 성공이 아니다.</li>
+                <li><strong>관측 위치를 기록한다.</strong> Client host, pod veth, node NIC, LB 앞뒤 중 어디에서 capture했는지 없으면 같은 packet을 다르게 해석할 수 있다.</li>
+                <li><strong>MTU budget을 architecture에 넣는다.</strong> VPC overlay, VPN, service mesh, cross-region tunnel의 header 합을 빼고 payload 상한을 계산한다.</li>
+                <li><strong>Offload를 의심한다.</strong> Host capture의 bad checksum이나 giant segment가 실제 wire 오류라고 단정하지 않는다. 필요하면 offload 상태와 NIC 반대편 capture를 비교한다.</li>
+                <li><strong>Header overhead를 작은 message 비용에 포함한다.</strong> 20byte payload를 connection마다 보내면 protocol·handshake overhead 비율이 매우 커진다. Batching과 connection reuse를 검토한다.</li>
+              </ul>
+              <p><strong>Anti-pattern:</strong> “OSI 7계층 문제”처럼 추상적 계층 이름만 붙이고 실제 source/destination address, port, interface, timestamp, packet size를 기록하지 않는 것.</p>
+              <p><strong>Edge case:</strong> TLS·QUIC·VPN·VXLAN은 또 다른 캡슐화 계층을 만든다. 외부 capture에서는 암호화된 UDP packet만 보이고 내부 application stream은 보이지 않을 수 있다. 관측 가능성은 암호화 경계와 namespace 경계에 의해 달라진다.</p>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+              <p><strong>상황:</strong> “작은 요청은 성공하지만 큰 요청은 timeout된다.”</p>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;">
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;width:34%;font-weight:700;vertical-align:top;">증상</td><td style="padding:11px;border:1px solid #dbe3e8;">Handshake와 작은 response는 성공하지만 큰 upload/download에서 정지, retransmission 증가, 특정 VPN·AZ 경로에서만 재현.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">먼저 수집할 증거/지표</td><td style="padding:11px;border:1px solid #dbe3e8;">양쪽 packet capture, packet size, TCP retransmission, ICMP Packet Too Big/Fragmentation Needed, interface MTU, route, tunnel header, NIC offload, request deadline.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">가능한 가설</td><td style="padding:11px;border:1px solid #dbe3e8;">Path MTU black hole, tunnel MTU 미반영, ICMP 차단, MSS clamping 오류, 한 방향 ACL, capture offload 착시, application body limit.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#edf8f2;font-weight:700;vertical-align:top;">안전한 첫 조치</td><td style="padding:11px;border:1px solid #dbe3e8;">변경 전 양 끝 증거를 고정하고, payload 크기를 단계적으로 늘려 임계점을 찾는다. 경로별 MTU와 MSS를 비교하고 최근 tunnel/LB 변경을 확인한다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Rollback/복구</td><td style="padding:11px;border:1px solid #dbe3e8;">최근 MTU·tunnel 변경을 rollback하거나 검증된 MTU/MSS 값으로 조정한다. ICMP 정책을 복구하고 canary 경로에서 큰 payload를 재검증한다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#fff0f2;font-weight:700;vertical-align:top;">하지 말아야 할 조치</td><td style="padding:11px;border:1px solid #dbe3e8;">근거 없이 timeout만 크게 늘리지 않는다. 모든 ICMP를 차단하지 않는다. Host capture의 bad checksum만 보고 NIC 장애로 단정하지 않는다.</td></tr>
+              </table>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 30분 재현 실습</h2>
+              <p><strong>목표:</strong> 하나의 HTTP 요청에서 application byte, TCP port/flags, IP address, link interface가 서로 다른 계층의 증거라는 사실을 확인한다.</p>
+              <h3 style="font-size:18px;color:#075985;">사전 조건과 예측</h3>
+              <ul style="padding-left:22px;">
+                <li>프로젝트에서 Docker를 사용할 수 있다.</li>
+                <li>먼저 예측한다: <code>curl http://api:8000/health</code> 한 번에 TCP packet은 정확히 2개일까? HTTP request와 TCP segment 수가 같은가?</li>
+              </ul>
+              <h3 style="font-size:18px;color:#075985;">최소 명령</h3>
+              <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;">make up
+
+# 터미널 A
+docker compose exec client sh
+ip -br addr
+ip route
+tcpdump -ni any -tttt -vv -c 20 'tcp port 8000'
+
+# 터미널 B
+docker compose exec client sh -c \
+  'curl -sS -D - http://api:8000/health -o /dev/null'
+
+# 연결과 byte queue 확인
+docker compose exec client ss -tn</pre>
+              <p><strong>예상 관찰:</strong> DNS 조회가 먼저 보일 수 있고, TCP 3-way handshake 뒤 HTTP request data와 response data, FIN/ACK 또는 connection reuse 흐름이 보인다. 한 HTTP 요청이 여러 TCP packet으로 나뉠 수 있고 ACK-only packet도 있어 “request 1개 = packet 1개”가 아니다.</p>
+
+              <h3 style="font-size:18px;color:#075985;">실패 주입</h3>
+              <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;"># 터미널 A에서 capture를 다시 시작
+tcpdump -ni any -tttt -vv -c 8 'host api and tcp port 8001'
+
+# 터미널 B에서 닫힌 port로 연결
+docker compose exec client sh -c 'nc -vz -w 2 api 8001'</pre>
+              <p><strong>예상 관찰:</strong> Route와 IP 전달은 가능하지만 destination port에 listening socket이 없으므로 SYN 뒤 RST가 돌아오거나 연결이 거절된다. “Network 전체 장애”가 아니라 transport endpoint 상태 문제다.</p>
+
+              <h3 style="font-size:18px;color:#075985;">자주 나는 오류와 해결</h3>
+              <ul style="padding-left:22px;">
+                <li><strong>tcpdump: permission denied:</strong> 프로젝트 이미지와 container capability를 확인하고 문서의 capture 절차를 사용한다.</li>
+                <li><strong>api 이름 해석 실패:</strong> container 내부에서 실행했는지 확인하고 <code>getent hosts api</code>로 DNS를 분리 진단한다.</li>
+                <li><strong>Packet이 너무 많이 보임:</strong> <code>host api and tcp port 8000</code>처럼 BPF filter를 좁힌다.</li>
+                <li><strong>Checksum incorrect:</strong> 송신 host capture라면 checksum offload 가능성을 먼저 확인한다.</li>
+              </ul>
+              <h3 style="font-size:18px;color:#075985;">Cleanup</h3>
+              <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;">exit
+make down</pre>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+              <ol style="padding-left:22px;">
+                <li><strong>Application message와 TCP segment를 동일시한다.</strong> TCP는 byte stream이므로 split·merge될 수 있다.</li>
+                <li><strong>Packet과 frame을 동일시한다.</strong> IP packet은 여러 hop을 가지만 Ethernet frame은 link마다 새로 만들어진다.</li>
+                <li><strong>TCP ACK를 application 성공으로 본다.</strong> ACK는 peer TCP가 byte를 수신했다는 transport 수준 신호다.</li>
+                <li><strong>Capture가 wire의 절대 진실이라고 본다.</strong> Capture 위치, namespace, encryption, offload에 따라 보이는 모습이 다르다.</li>
+                <li><strong>Header overhead를 0으로 본다.</strong> 작은 message·짧은 connection·tunnel이 많으면 overhead가 throughput과 비용에 큰 비중을 차지한다.</li>
+                <li><strong>Router가 MAC address를 end-to-end 유지한다고 생각한다.</strong> MAC은 현재 link의 next-hop 전달에 사용된다.</li>
+              </ol>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 수준 질문</h2>
+              <h3 style="font-size:18px;color:#075985;">Q1. “사용자가 1MB를 send하면 packet 하나로 나갑니까?”</h3>
+              <p><strong>좋은 답변 구조:</strong> TCP byte stream 정의 → send buffer → MSS·window·congestion·offload → 여러 segment와 ACK → IP packet과 frame → capture 위치에 따른 착시 → UDP 또는 message protocol과 비교 → 성능 판단에는 batching·syscall·latency trade-off가 있음을 설명한다.</p>
+              <h3 style="font-size:18px;color:#075985;">Q2. “Router 한 대를 지날 때 header가 어떻게 바뀝니까?”</h3>
+              <p><strong>좋은 답변 구조:</strong> Ingress frame decapsulation → IP destination route lookup → TTL/hop limit 감소 → next-hop resolution → 새 source/destination MAC과 FCS → NAT/tunnel 예외 → checksum과 MTU → 관측 지점을 명시한다.</p>
+              <h3 style="font-size:18px;color:#075985;">Q3. “작은 요청은 되는데 큰 요청만 멈춥니다. 어떻게 진단합니까?”</h3>
+              <p><strong>좋은 답변 구조:</strong> Size threshold 재현 → 양 끝 packet capture → retransmission·ICMP·MSS·MTU → tunnel overhead와 ICMP 정책 → application body limit 대안 → 안전한 canary 조정과 rollback → timeout 확대가 원인 해결이 아님을 말한다.</p>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 어제 내용 회상 3문제</h2>
+              <ol style="padding-left:22px;">
+                <li>Process가 socket을 직접 들고 있는가, file descriptor를 통해 kernel object를 참조하는가?</li>
+                <li>Client와 server는 물리 장비 종류인가, 한 통신에서 맡은 역할인가?</li>
+                <li><code>send()</code> 성공이 peer application 처리 성공을 의미하지 않는 이유는 무엇인가?</li>
+              </ol>
+              <h3 style="font-size:18px;color:#075985;">짧은 정답/채점 기준</h3>
+              <ol style="padding-left:22px;">
+                <li>Process의 fd table entry가 open file description/socket을 간접 참조한다고 답하면 통과.</li>
+                <li>연결을 시작하고 service를 요청하는 쪽과 listen/accept하는 쪽의 역할이라고 답하면 통과.</li>
+                <li>Local kernel buffer 수용과 peer kernel ACK, application read/commit은 서로 다른 성공 지점이라고 답하면 통과.</li>
+              </ol>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 오늘 내용 확인 3문제</h2>
+              <ol style="padding-left:22px;">
+                <li>TCP segment 전체는 IP 계층에서 무엇으로 취급되는가?</li>
+                <li>Router를 통과할 때 일반적으로 IP 목적지와 Ethernet 목적지 중 어느 것이 hop마다 바뀌는가?</li>
+                <li>Host capture에서 MTU보다 큰 TCP segment가 보였을 때 확인할 첫 가설은 무엇인가?</li>
+              </ol>
+              <h3 style="font-size:18px;color:#075985;">짧은 정답/채점 기준</h3>
+              <ol style="padding-left:22px;">
+                <li>IP packet의 payload라고 답하면 통과.</li>
+                <li>Ethernet 목적지 MAC이 next hop마다 바뀌고, NAT·proxy가 없다면 IP 목적지는 유지된다고 범위를 붙이면 통과.</li>
+                <li>TSO/GSO 같은 segmentation offload와 capture 위치를 먼저 확인한다고 답하면 통과.</li>
+              </ol>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">12. 공식 자료</h2>
+              <ul style="padding-left:22px;">
+                <li><a href="https://www.rfc-editor.org/rfc/rfc9293.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 9293 — Transmission Control Protocol: TCP segment header, sequence와 ACK</a></li>
+                <li><a href="https://www.rfc-editor.org/rfc/rfc8200.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 8200 — IPv6 Specification: packet, payload, Next Header, link MTU</a></li>
+                <li><a href="https://www.rfc-editor.org/rfc/rfc894.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 894 — IP datagram을 Ethernet frame에 캡슐화하는 표준</a></li>
+                <li><a href="https://www.rfc-editor.org/rfc/rfc1122.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 1122 — Internet host communication layers와 protocol requirements</a></li>
+              </ul>
+
+              <div style="margin-top:28px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+                <strong style="color:#7dd3fc;">내일 예고 · Day 03</strong><br>
+                IPv4/IPv6 address, subnet과 CIDR을 binary prefix 관점으로 계산하고, 같은 subnet인지에 따라 next-hop과 Ethernet frame 경로가 어떻게 달라지는지 분석합니다.
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

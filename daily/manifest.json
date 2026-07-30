@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-07-29T09:51:24+09:00",
+  "updatedAt": "2026-07-30T09:20:32+09:00",
   "lessons": [
     {
       "day": 1,
@@ -14,6 +14,15 @@
       "path": "day-01.html",
       "kind": "lesson",
       "publishedAt": "2026-07-29T09:51:24+09:00"
+    },
+    {
+      "day": 2,
+      "week": 1,
+      "title": "byte → segment → packet → frame 캡슐화",
+      "summary": "Application byte가 TCP segment, IP packet, Ethernet frame으로 캡슐화되고 hop마다 어떤 상태가 바뀌는지 학습합니다.",
+      "path": "day-02.html",
+      "kind": "lesson",
+      "publishedAt": "2026-07-30T09:20:32+09:00"
     }
   ]
 }
