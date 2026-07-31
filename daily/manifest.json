@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-07-30T09:20:32+09:00",
+  "updatedAt": "2026-07-31T09:00:12+09:00",
   "lessons": [
     {
       "day": 1,
@@ -23,6 +23,15 @@
       "path": "day-02.html",
       "kind": "lesson",
       "publishedAt": "2026-07-30T09:20:32+09:00"
+    },
+    {
+      "day": 3,
+      "week": 1,
+      "title": "IPv4/IPv6, subnet, CIDR",
+      "summary": "IPv4·IPv6 prefix를 bit 집합으로 계산하고 connected route, longest-prefix match, on-link와 gateway 결정을 kernel 관점에서 학습합니다.",
+      "path": "day-03.html",
+      "kind": "lesson",
+      "publishedAt": "2026-07-31T09:00:12+09:00"
     }
   ]
 }
