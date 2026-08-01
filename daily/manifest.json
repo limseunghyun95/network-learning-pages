@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-07-31T09:00:12+09:00",
+  "updatedAt": "2026-08-01T09:20:23+09:00",
   "lessons": [
     {
       "day": 1,
@@ -32,6 +32,15 @@
       "path": "day-03.html",
       "kind": "lesson",
       "publishedAt": "2026-07-31T09:00:12+09:00"
+    },
+    {
+      "day": 4,
+      "week": 1,
+      "title": "MAC, ARP/ND, switch",
+      "summary": "Route가 정한 next-hop IP를 ARP·IPv6 NDP로 MAC에 해석하고, neighbor cache와 switch FDB의 상태·수렴·보안 경계를 학습합니다.",
+      "path": "day-04.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-01T09:20:23+09:00"
     }
   ]
 }
