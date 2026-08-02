@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 05</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 1 / DAY 05</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">route, gateway, TTL/hop limit</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">Packet이 router hop을 건너는 forwarding state machine · 예상 학습 40분 + 실습 25분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Route는 destination prefix에 대한 “다음 행동”이다. 각 router는 packet마다 forwarding table에서 가장 구체적인 경로를 골라 next hop과 egress queue를 정하고 TTL/hop limit을 줄인다. 값이 0이 되면 loop를 끝내고 ICMP Time Exceeded라는 관측 가능한 실패를 만든다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;width:29%;font-weight:700;vertical-align:top;">Route</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Destination prefix가 일치할 때 사용할 next hop, egress interface, metric과 속성을 담은 규칙. “경로 전체”가 아니라 현재 node의 다음 결정을 주로 표현한다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Gateway / next hop</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">현재 link에서 packet을 먼저 넘길 router의 IP. Gateway는 최종 destination을 대신하지 않으며, IP destination은 보통 유지되고 Ethernet destination만 gateway MAC이 된다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">RIB / FIB</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">RIB(Routing Information Base)는 static route와 routing protocol 후보·정책을 관리하는 control-plane 상태다. FIB(Forwarding Information Base)는 선택 결과를 data plane이 빠르게 lookup하도록 만든 table이다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">LPM</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Longest Prefix Match. Destination과 일치하는 route 중 prefix length가 가장 긴, 즉 가장 구체적인 route를 먼저 선택한다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Default route</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;"><code>0.0.0.0/0</code> 또는 <code>::/0</code>. 더 구체적인 route가 없을 때 쓰는 최후의 일치 규칙이며 반드시 Internet을 뜻하지 않는다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">TTL / Hop Limit</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">IPv4 Time To Live과 IPv6 Hop Limit. Forwarding node마다 1 감소하는 8bit 값으로, routing loop에서 packet이 영원히 돌지 않게 한다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">ICMP</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Internet Control Message Protocol. IP forwarding 오류와 진단 정보를 운반한다. TTL 만료 시 router는 보통 source로 Time Exceeded를 보낸다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">ECMP / policy routing</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">ECMP는 같은 비용의 여러 next hop을 사용하는 방식이다. Policy routing은 destination뿐 아니라 source, mark, ingress 등의 조건으로 routing table 자체를 선택한다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>Application timeout은 “목적지 route 없음”부터 “왕복 중 return route 없음”, “ECMP 한 path만 drop”, “routing loop로 TTL 소진”까지 전혀 다른 원인을 가진다. DNS와 TCP만 보면 이 구간을 놓친다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Route 존재와 end-to-end 도달은 다르다.</strong> Local FIB entry는 다음 hop까지의 의도일 뿐, 모든 downstream router와 return path를 보장하지 않는다.</li>
+            <li><strong>Forward와 return path는 독립적이다.</strong> Request가 server에 도착해도 reply route·firewall·NAT state가 다르면 client는 timeout한다.</li>
+            <li><strong>Control plane 정상과 data plane 정상도 다르다.</strong> Routing protocol은 route를 선택했지만 FIB programming, adjacency, ASIC, egress queue가 실패할 수 있다.</li>
+            <li><strong>Traceroute의 별표는 곧 packet loss가 아니다.</strong> Router가 forwarding은 하면서 ICMP 생성·반환만 filter하거나 rate-limit할 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:separate;border-spacing:0 6px;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="background:#082f49;color:#fff;text-align:center;padding:13px;border-radius:8px;"><strong>① Client kernel</strong><br><span style="font-size:14px;color:#d5edf7;">policy rule → table → LPM → gateway R1 · TTL=64</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ gateway MAC으로 frame · IP destination은 server 유지</td></tr>
+            <tr><td style="background:#eef2ff;text-align:center;padding:13px;border:1px solid #c7d2fe;border-radius:8px;"><strong>② Router R1 ingress</strong><br><span style="font-size:14px;">frame 제거 → header 검증 → TTL 64→63 → FIB lookup</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ egress queue · next-hop frame 재생성</td></tr>
+            <tr><td style="background:#fff7e6;text-align:center;padding:13px;border:1px solid #f0cf88;border-radius:8px;"><strong>③ Router R2</strong><br><span style="font-size:14px;">TTL 63→62 · ECMP hash가 path B 선택 가능</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ route·neighbor·ACL/QoS를 통과</td></tr>
+            <tr><td style="background:#edf8f2;text-align:center;padding:13px;border:1px solid #a8d8bd;border-radius:8px;"><strong>④ Destination subnet / server</strong><br><span style="font-size:14px;">local delivery → socket → application</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↺ reply는 독립적인 return-route lookup</td></tr>
+            <tr><td style="background:#f7fafb;text-align:center;padding:13px;border:1px solid #cbd8de;border-radius:8px;"><strong>⑤ Client가 response 수신</strong><br><span style="font-size:14px;">왕복 path·NAT/conntrack·socket state가 모두 맞아야 성공</span></td></tr>
+          </table>
+          <h3 style="font-size:18px;color:#075985;">번호별 packet·queue·timestamp</h3>
+          <ol style="padding-left:22px;">
+            <li>Client는 network namespace/VRF, policy rule과 table을 고른 뒤 LPM한다. <code>ip route get DEST</code>는 선택 route, source IP, interface를 함께 보여준다.</li>
+            <li>R1은 ingress frame을 벗기고 destination이 자기 것이 아니면 forwarding한다. TTL을 줄이고 0이면 packet을 discard한 뒤 ICMP Time Exceeded를 source로 보낸다.</li>
+            <li>Route가 여러 next hop을 가지면 ECMP hash가 flow를 한 path에 매핑할 수 있다. 구현에 따라 hash field·seed가 달라 동일 destination도 source port에 따라 경로가 달라질 수 있다.</li>
+            <li>각 hop의 egress queue에서 congestion drop·delay가 생길 수 있다. Route lookup 성공은 queue admission이나 다음 hop delivery 성공을 보장하지 않는다.</li>
+            <li>Server가 처리해도 reply는 별도 FIB lookup을 거친다. Request/response 양 끝 packet capture의 5-tuple·TTL·timestamp를 맞춰야 비대칭을 찾는다.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Control plane에서 data plane까지</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">단계</th><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">상태 소유자 · 성공 시점 · 불변식</th></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;">1. 학습</td><td style="padding:10px;border:1px solid #dbe3e8;">Static config, connected route, OSPF/BGP, cloud controller가 후보를 RIB에 넣는다. 수신했다는 사실과 신뢰·선택은 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;">2. 선택</td><td style="padding:10px;border:1px solid #dbe3e8;">Routing daemon/kernel이 정책·관리 거리·metric으로 best route를 정한다. 단, 더 긴 prefix는 넓은 default보다 우선한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;">3. Programming</td><td style="padding:10px;border:1px solid #dbe3e8;">선택 route와 adjacency를 FIB/ASIC에 설치한다. RIB best와 실제 hardware FIB가 일치해야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;">4. Forwarding</td><td style="padding:10px;border:1px solid #dbe3e8;">Packet마다 LPM→next hop→neighbor→egress queue를 수행한다. Packet은 한 hop의 route 전체만 알고 다음 router가 다시 결정한다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">TTL/hop limit과 traceroute</h3>
+          <ul style="padding-left:22px;">
+            <li>IPv4 TTL은 역사적으로 time 의미도 있지만 실무 unicast forwarding에서는 router마다 최소 1 감소하는 hop 제한으로 관찰된다. IPv6는 이름부터 Hop Limit이다.</li>
+            <li>Traceroute는 TTL/hop limit을 1, 2, 3…으로 올린 probe를 보내 각 hop의 Time Exceeded 응답을 모은다. 응답 source는 router의 어떤 interface 주소일 수 있어 실제 forwarding interface와 같다고 단정하지 않는다.</li>
+            <li>ICMP가 돌아오는 path는 probe가 간 path와 다를 수 있다. 표시 RTT는 해당 hop의 forwarding latency만이 아니라 ICMP 생성, control-plane 처리, return path와 queue를 포함한다.</li>
+            <li>Router는 ICMP error를 rate-limit하거나 정책상 보내지 않을 수 있다. 중간 hop <code>*</code> 뒤 최종 destination이 응답하면 그 hop은 forwarding했지만 진단 응답만 보이지 않은 것이다.</li>
+          </ul>
+
+          <h3 style="font-size:18px;color:#075985;">ECMP, metric, policy의 순서</h3>
+          <p>먼저 rule/VRF가 조회할 table을 정할 수 있고, 그 table 안에서 LPM이 가장 구체적인 prefix를 고른다. 같은 prefix 후보 중 protocol preference와 metric으로 best/ECMP set을 만들며, ECMP data plane은 보통 flow hash로 next hop을 고른다. “Metric이 낮은 default가 /24보다 이긴다”는 설명은 틀리다.</p>
+          <p><strong>Edge case:</strong> Tunnel, NAT, service mesh, Kubernetes CNI는 안쪽 packet과 바깥쪽 packet에 서로 다른 TTL/hop limit과 route lookup을 만들 수 있다. 어느 namespace와 encapsulation layer에서 관측했는지 기록한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 Best Practice</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Route 변경 전·후 증거를 고정한다.</strong> Rule, table, exact <code>route get</code>, neighbor, interface counters와 양방향 capture를 timestamp와 함께 저장한다.</li>
+            <li><strong>Forward와 return path를 따로 검증한다.</strong> Client→VIP뿐 아니라 server→client source prefix의 FIB, NAT/conntrack와 security policy를 확인한다.</li>
+            <li><strong>Default route를 catch-all로 취급한다.</strong> “Internet gateway”라는 이름에 기대지 말고 실제 next hop의 소유자, failover, NAT·firewall 경계를 문서화한다.</li>
+            <li><strong>Exception route에 owner와 만료를 둔다.</strong> 긴 /32·/128 우회는 정상 aggregate를 이긴다. Incident 임시 route가 영구 장애 원인이 되지 않도록 자동 만료·review를 둔다.</li>
+            <li><strong>ECMP를 flow 단위로 시험한다.</strong> 단일 ping만으로 모든 path를 검증하지 말고 source port·protocol을 바꾼 probe와 per-next-hop drop/latency를 본다.</li>
+            <li><strong>Out-of-band 복구 경로를 확보한다.</strong> Default route나 management prefix를 바꾸기 전 console/OOB와 rollback timer를 준비해 자기 접속을 끊지 않는다.</li>
+          </ul>
+          <p><strong>Anti-pattern:</strong> Traceroute에서 느린 한 hop을 보고 그 router가 병목이라고 단정하는 것. 해당 router가 ICMP를 낮은 우선순위로 처리해도 transit traffic은 정상일 수 있으므로 다음 hop과 end-to-end latency를 함께 비교한다.</p>
+          <p><strong>Engine 차이:</strong> Linux policy routing, cloud route table, router ASIC, eBPF CNI는 lookup pipeline과 공개 telemetry가 다르다. 논리적으로는 table 선택·LPM·next hop·adjacency·queue를 확인하되 platform 공식 도구로 증거를 수집한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> Route 변경 직후 특정 prefix에서 TTL exceeded와 timeout이 증가했다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;width:34%;font-weight:700;vertical-align:top;">증상</td><td style="padding:11px;border:1px solid #dbe3e8;">ICMP Time Exceeded 반복, traceroute hop이 순환, request timeout·retransmission 증가, 특정 source/ECMP flow만 실패.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">먼저 수집할 증거/지표</td><td style="padding:11px;border:1px solid #dbe3e8;">변경 전후 RIB/FIB, exact source를 포함한 route lookup, TTL과 ICMP embedded header capture, per-next-hop counters, routing protocol adjacency, config diff, 양방향 timestamp.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">가능한 가설</td><td style="padding:11px;border:1px solid #dbe3e8;">두 router의 상호 default/aggregate loop, stale FIB, route redistribution 오류, 더 구체적인 잘못된 route, ECMP member black hole, return route 부재, tunnel 안팎 TTL 소진.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#edf8f2;font-weight:700;vertical-align:top;">안전한 첫 조치</td><td style="padding:11px;border:1px solid #dbe3e8;">영향 prefix와 canary source를 고정하고 최근 route diff를 확인한다. 잘못된 한 ECMP member를 drain하거나 문제 prefix의 최근 변경만 검증된 이전 next hop으로 되돌린다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Rollback/복구</td><td style="padding:11px;border:1px solid #dbe3e8;">이전 route policy/config를 atomic rollback하고 RIB→FIB 수렴과 neighbor adjacency를 확인한다. Forward/return canary, TTL, loss가 정상화된 뒤 traffic을 단계적으로 복구한다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#fff0f2;font-weight:700;vertical-align:top;">하지 말아야 할 조치</td><td style="padding:11px;border:1px solid #dbe3e8;">Default route 전체 삭제, 모든 routing session reset, TTL 증가로 loop 은폐, ICMP 전체 차단을 하지 않는다. 원인 증거와 관리 접속을 동시에 잃을 수 있다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 25분 재현 실습</h2>
+          <p><strong>목표:</strong> Local/default route 선택, TTL=1 만료, 더 구체적인 unreachable route의 즉시 실패를 하나의 lab에서 관찰한다.</p>
+          <h3 style="font-size:18px;color:#075985;">사전 조건과 실행 전 예측</h3>
+          <ul style="padding-left:22px;">
+            <li>Docker가 실행 중이고 저장소 root에 있다.</li>
+            <li>예측 1: <code>172.28.0.20</code>과 <code>1.1.1.1</code>은 같은 gateway를 쓰는가?</li>
+            <li>예측 2: TTL=1인 외부 packet은 어느 node에서 사라지고 어떤 ICMP가 돌아오는가?</li>
+            <li>예측 3: <code>198.51.100.10/32</code> unreachable이 default /0보다 우선하는가?</li>
+          </ul>
+          <h3 style="font-size:18px;color:#075985;">최소 명령과 예상 관찰</h3>
+          <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;">cd labs/basic-network-observability
+make up
+docker compose exec client ip route
+docker compose exec client ip route get 172.28.0.20
+docker compose exec client ip route get 1.1.1.1
+
+# 터미널 A
+docker compose exec client \
+  tcpdump -ni eth0 -tttt -vv 'icmp'
+
+# 터미널 B: 첫 forwarding hop에서 TTL 만료
+docker compose exec client \
+  ping -c 1 -W 2 -t 1 1.1.1.1 || true</pre>
+          <p><strong>예상:</strong> API는 connected route로 직접 가고 외부 주소는 default gateway를 사용한다. TTL=1 probe는 첫 router에서 0이 되어 discard되고 ICMP Time Exceeded가 보일 수 있다. 환경이 ICMP를 filter/rate-limit하면 응답 부재 자체를 hop 장애로 단정하지 않는다.</p>
+          <h3 style="font-size:18px;color:#075985;">실패 주입과 rollback</h3>
+          <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;">docker compose exec client ip route add \
+  unreachable 198.51.100.10/32 metric 10
+docker compose exec client \
+  ip route get 198.51.100.10 || true
+docker compose exec client \
+  ping -c 1 -W 1 198.51.100.10 || true
+
+# rollback
+docker compose exec client ip route del \
+  unreachable 198.51.100.10/32 metric 10
+docker compose exec client ip route get 198.51.100.10</pre>
+          <p><strong>예상:</strong> /32 reject route가 /0보다 구체적이라 즉시 unreachable 오류를 만든다. 삭제하면 다시 default route가 선택된다. Timeout과 즉시 reject는 failure mode가 다르다.</p>
+          <h3 style="font-size:18px;color:#075985;">자주 나는 오류와 해결</h3>
+          <ul style="padding-left:22px;">
+            <li><strong>Operation not permitted:</strong> Compose의 <code>client</code>에서 실행한다. 이 service에 실습용 <code>NET_ADMIN</code>이 있다.</li>
+            <li><strong>TTL 옵션 오류:</strong> 이 image의 iputils <code>ping</code>에서 <code>-t</code>가 TTL이다. 다른 OS ping은 옵션 의미가 다를 수 있다.</li>
+            <li><strong>ICMP가 안 보임:</strong> Docker Desktop/host firewall과 upstream이 ICMP error를 숨길 수 있다. Route lookup과 outbound TTL capture까지를 증거로 남긴다.</li>
+            <li><strong>RTNETLINK: File exists:</strong> 이전 /32가 남았는지 <code>ip route show 198.51.100.10/32</code>로 확인하고 cleanup한다.</li>
+          </ul>
+          <h3 style="font-size:18px;color:#075985;">Cleanup</h3>
+          <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;">docker compose exec client ip route del \
+  unreachable 198.51.100.10/32 metric 10 \
+  2&gt;/dev/null || true
+make down</pre>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>Gateway가 packet의 최종 IP destination이 된다고 생각한다.</strong> 일반 routing에서는 link-layer destination만 next-hop MAC으로 바뀐다.</li>
+            <li><strong>Route table entry가 있으면 성공이라고 본다.</strong> FIB programming, neighbor, egress queue, downstream와 return path가 남아 있다.</li>
+            <li><strong>Metric부터 비교한다.</strong> Table 선택과 prefix length가 먼저이며 metric은 같은 prefix 후보의 선택에 주로 쓰인다.</li>
+            <li><strong>TTL은 latency timeout이라고 생각한다.</strong> 현대 forwarding에서 핵심 역할은 hop마다 감소해 loop를 제한하는 것이다.</li>
+            <li><strong>Traceroute path가 고정이라고 믿는다.</strong> ECMP hash, per-flow routing, control-plane response source와 return path 때문에 probe마다 달라질 수 있다.</li>
+            <li><strong>ICMP를 불필요한 traffic으로 전부 차단한다.</strong> Time Exceeded와 Packet Too Big 등 진단·정상 동작 신호까지 잃는다.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 수준 질문</h2>
+          <h3 style="font-size:18px;color:#075985;">Q1. Router가 packet 하나를 forwarding할 때 내부 순서를 설명해 보세요.</h3>
+          <p><strong>좋은 답변 구조:</strong> Ingress frame decapsulation → IP header/local-delivery 판단 → table 선택·LPM → TTL/hop limit 감소와 ICMP 조건 → ACL/QoS/NAT의 platform별 pipeline 범위 → next-hop adjacency → egress queue/frame → 성공 지점과 drop counter를 설명한다.</p>
+          <h3 style="font-size:18px;color:#075985;">Q2. Traceroute 5번째 hop이 *인데 6번째와 목적지는 응답합니다. 장애입니까?</h3>
+          <p><strong>좋은 답변 구조:</strong> Transit forwarding과 ICMP 응답 분리 → rate-limit/filter/control-plane 우선순위 → ECMP와 비대칭 return path → end-to-end loss/latency 비교 → TCP/UDP/ICMP probe 차이 → 양 끝 capture로 검증한다.</p>
+          <h3 style="font-size:18px;color:#075985;">Q3. Multi-AZ에서 ECMP를 쓰는 service의 간헐 timeout을 어떻게 좁힙니까?</h3>
+          <p><strong>좋은 답변 구조:</strong> Traffic·flow 수치와 SLO → 5-tuple별 재현 → per-next-hop loss/queue/FIB/neighbor → return path·NAT state → unhealthy member drain → capacity trade-off·rollback → synthetic multi-flow monitoring을 제안한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 어제 내용 회상 3문제</h2>
+          <ol style="padding-left:22px;">
+            <li>Remote destination으로 보낼 때 ARP/ND가 해석하는 IP는 누구인가?</li>
+            <li>Host neighbor cache와 switch FDB의 key→value 차이는?</li>
+            <li>IPv6 neighbor entry의 STALE은 즉시 실패를 뜻하는가?</li>
+          </ol>
+          <h3 style="font-size:18px;color:#075985;">짧은 정답/채점 기준</h3>
+          <ol style="padding-left:22px;">
+            <li>Route가 선택한 gateway/next-hop IP라고 답하면 통과.</li>
+            <li>IP+interface→MAC/reachability와 VLAN+MAC→switch port를 구분하면 통과.</li>
+            <li>아니며 mapping은 사용 가능하고 다음 traffic에서 DELAY/PROBE로 검증할 수 있다고 답하면 통과.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 오늘 내용 확인 3문제</h2>
+          <ol style="padding-left:22px;">
+            <li>Default /0와 일치하는 /24 route가 있을 때 무엇이 선택되며 왜 그런가?</li>
+            <li>Router가 TTL/hop limit을 0으로 만들면 packet과 source에 어떤 일이 생기는가?</li>
+            <li>Local route 성공만으로 request 성공을 확정할 수 없는 이유 두 가지는?</li>
+          </ol>
+          <h3 style="font-size:18px;color:#075985;">짧은 정답/채점 기준</h3>
+          <ol style="padding-left:22px;">
+            <li>LPM 때문에 더 구체적인 /24가 선택된다고 답하면 통과.</li>
+            <li>Packet을 discard하고 일반적으로 ICMP Time Exceeded를 source로 보낸다고 답하면 통과.</li>
+            <li>예: FIB programming/neighbor/queue/downstream 실패, return route·firewall·NAT state 부재 중 두 가지를 말하면 통과.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">12. 공식 자료</h2>
+          <ul style="padding-left:22px;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc1812.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 1812 — IPv4 router의 forwarding, longest match, next hop과 TTL 처리</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc8200.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 8200 — IPv6 header와 forwarding node의 Hop Limit 처리</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc792.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 792 — IPv4 ICMP Time Exceeded message와 원 packet 식별 정보</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc4443.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 4443 — ICMPv6 Time Exceeded와 error-message 처리·rate limiting</a></li>
+          </ul>
+
+          <div style="margin-top:28px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 06</strong><br>
+            Week 1 통합 랩에서 <code>ip addr/route</code>, <code>ss</code>, <code>tcpdump</code>를 함께 사용해 정상 path, 잘못된 port, 잘못된 route를 시간순 증거로 진단합니다.
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

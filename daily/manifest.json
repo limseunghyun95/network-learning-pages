@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-01T09:20:23+09:00",
+  "updatedAt": "2026-08-02T09:17:11+09:00",
   "lessons": [
     {
       "day": 1,
@@ -41,6 +41,15 @@
       "path": "day-04.html",
       "kind": "lesson",
       "publishedAt": "2026-08-01T09:20:23+09:00"
+    },
+    {
+      "day": 5,
+      "week": 1,
+      "title": "route, gateway, TTL/hop limit",
+      "summary": "RIB에서 FIB까지 route가 programming되는 과정과 LPM·ECMP·gateway·TTL/hop limit·ICMP Time Exceeded를 packet timeline으로 학습합니다.",
+      "path": "day-05.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-02T09:17:11+09:00"
     }
   ]
 }
