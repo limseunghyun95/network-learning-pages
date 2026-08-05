@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-02T09:17:11+09:00",
+  "updatedAt": "2026-08-05T09:09:48+09:00",
   "lessons": [
     {
       "day": 1,
@@ -50,6 +50,15 @@
       "path": "day-05.html",
       "kind": "lesson",
       "publishedAt": "2026-08-02T09:17:11+09:00"
+    },
+    {
+      "day": 6,
+      "week": 1,
+      "title": "랩: ip addr/route, ss, tcpdump",
+      "summary": "주소·route·socket·packet 증거를 timestamp로 연결하고 잘못된 port와 blackhole route를 주입해 connection refused와 local routing failure를 구분합니다.",
+      "path": "day-06.html",
+      "kind": "lab",
+      "publishedAt": "2026-08-05T09:09:48+09:00"
     }
   ]
 }
