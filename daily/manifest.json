@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-05T09:09:48+09:00",
+  "updatedAt": "2026-08-06T09:00:28+09:00",
   "lessons": [
     {
       "day": 1,
@@ -59,6 +59,15 @@
       "path": "day-06.html",
       "kind": "lab",
       "publishedAt": "2026-08-05T09:09:48+09:00"
+    },
+    {
+      "day": 7,
+      "week": 1,
+      "title": "회상: localhost와 remote path 비교",
+      "summary": "localhost와 remote 요청이 name resolution 이후 local table과 main route에서 갈라지는 과정을 namespace·socket·queue·packet 관점으로 비교하고 Week 1 전체를 복습합니다.",
+      "path": "day-07.html",
+      "kind": "review",
+      "publishedAt": "2026-08-06T09:00:28+09:00"
     }
   ]
 }
