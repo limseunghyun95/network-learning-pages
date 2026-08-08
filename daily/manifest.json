@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-06T09:00:28+09:00",
+  "updatedAt": "2026-08-08T09:10:36+09:00",
   "lessons": [
     {
       "day": 1,
@@ -68,6 +68,15 @@
       "path": "day-07.html",
       "kind": "review",
       "publishedAt": "2026-08-06T09:00:28+09:00"
+    },
+    {
+      "day": 8,
+      "week": 2,
+      "title": "stub/recursive/authoritative resolver",
+      "summary": "Application의 이름 질문이 stub resolver, recursive resolver의 cache·iterative lookup, authoritative zone을 거쳐 최종 answer로 돌아오는 상태와 실패 경계를 학습합니다.",
+      "path": "day-08.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-08T09:10:36+09:00"
     }
   ]
 }
