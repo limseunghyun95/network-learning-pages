@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-08T09:10:36+09:00",
+  "updatedAt": "2026-08-09T09:11:25+09:00",
   "lessons": [
     {
       "day": 1,
@@ -77,6 +77,15 @@
       "path": "day-08.html",
       "kind": "lesson",
       "publishedAt": "2026-08-08T09:10:36+09:00"
+    },
+    {
+      "day": 9,
+      "week": 2,
+      "title": "A/AAAA/CNAME/NS와 negative answer",
+      "summary": "주소 RRset, alias chain, zone delegation과 NXDOMAIN·NODATA의 의미 및 negative cache key를 packet section과 상태 소유권 관점으로 구분합니다.",
+      "path": "day-09.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-09T09:11:25+09:00"
     }
   ]
 }
