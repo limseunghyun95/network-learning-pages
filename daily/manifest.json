@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-09T09:11:25+09:00",
+  "updatedAt": "2026-08-10T09:16:31+09:00",
   "lessons": [
     {
       "day": 1,
@@ -86,6 +86,15 @@
       "path": "day-09.html",
       "kind": "lesson",
       "publishedAt": "2026-08-09T09:11:25+09:00"
+    },
+    {
+      "day": 10,
+      "week": 2,
+      "title": "cache, TTL, negative caching",
+      "summary": "Positive·negative·resolution-failure cache의 key와 expiry, TTL 기반 consistency window, cache stampede·serve-stale·rollout trade-off를 학습합니다.",
+      "path": "day-10.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-10T09:16:31+09:00"
     }
   ]
 }

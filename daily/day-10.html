@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 10</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 2 / DAY 10</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">Cache, TTL, negative caching</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">DNS를 분산 cache 시스템으로 이해하기 · 예상 학습 45분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            TTL은 “이 시간이 지나면 자동 변경된다”가 아니라 resolver가 특정 positive·negative state를 재사용할 수 있는 상한이다. 긴 TTL은 latency·authority load·outage 내성을 개선하지만 변경·rollback 수렴을 늦추고, 짧은 TTL은 반대 trade-off와 cache stampede 위험을 만든다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:29%;font-weight:700;vertical-align:top;">Cache entry</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Query 결과와 key, 삽입 시각, expiry를 묶은 resolver state. Positive RRset뿐 아니라 부재와 resolution failure도 entry가 될 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">TTL</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Time To Live. RR을 cache해도 되는 초 단위 interval. TTL 0은 현재 transaction에서만 사용하고 cache하지 않는다는 의미다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Age / remaining TTL</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Cache에 들어온 뒤 지난 시간과 남은 재사용 시간. 보통 <code>remaining = stored TTL - age</code>이며 cache hit가 expiry를 연장하지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Positive cache</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">A·AAAA·CNAME·NS처럼 존재하는 RRset을 저장한 cache.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Negative cache</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">이름 부재(NXDOMAIN)나 type 부재(NODATA)를 저장한 state. Authoritative SOA가 negative TTL 근거를 제공한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Failure cache</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">SERVFAIL, timeout, unreachable, validation failure처럼 유용한 answer를 얻지 못한 resolution failure를 잠시 저장해 반복 폭주를 막는 cache.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Cache hit / miss</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">유효 entry로 응답하면 hit, 없거나 만료되어 upstream resolution이 필요하면 miss다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Request coalescing</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">같은 key의 동시 miss를 하나의 upstream lookup으로 합치고 여러 waiter가 결과를 공유하는 기법. Singleflight라고도 부른다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Cache stampede</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Hot entry가 만료되는 순간 다수 request가 동시에 upstream으로 몰리는 현상. Authority와 resolver queue를 함께 과부하시킬 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Serve stale</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Refresh가 실패했을 때 이미 만료된 cache data를 제한적으로 제공해 availability를 높이는 정책. Freshness와 장애 내성의 명시적 trade-off다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>DNS rollout에서 “TTL을 60초로 바꿨으니 1분 뒤 전부 새 IP”라는 말은 대개 틀리다. 이미 어제 3600초 TTL로 cache한 resolver는 그 entry의 남은 TTL을 계속 사용한다. 새 TTL은 다음 refresh로 받아들인 entry부터 적용된다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>TTL은 consistency window다.</strong> 정상 cache 동작에서도 여러 resolver가 old/new RRset을 동시에 제공하는 시간이 존재한다.</li>
+            <li><strong>TTL은 capacity knob다.</strong> 짧게 할수록 authority QPS, network packet, recursive CPU·queue가 늘어난다.</li>
+            <li><strong>Negative TTL도 배포 상태다.</strong> 실수로 NXDOMAIN을 낸 뒤 record를 생성해도 negative cache가 만료될 때까지 일부 client는 계속 부재를 본다.</li>
+            <li><strong>Failure caching은 retry storm을 제어한다.</strong> 모든 authority가 실패할 때 매 client query를 그대로 재시도하면 DNS 자체가 복구 불능으로 악화될 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 cache 상태 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:separate;border-spacing:0 6px;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="background:#082f49;color:#fff;text-align:center;padding:13px;border-radius:8px;"><strong>① Query &lt;name,type,class&gt;</strong><br><span style="font-size:14px;color:#d5edf7;">t0 · client → recursive resolver</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ cache lookup</td></tr>
+            <tr><td style="background:#edf8f2;text-align:center;padding:13px;border:1px solid #a8d8bd;border-radius:8px;"><strong>② Fresh hit</strong><br><span style="font-size:14px;">now &lt; expiry → remaining TTL을 줄여 즉시 response</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">또는 miss/expired ↓</td></tr>
+            <tr><td style="background:#fff7e6;text-align:center;padding:13px;border:1px solid #f0cf88;border-radius:8px;"><strong>③ In-flight singleflight</strong><br><span style="font-size:14px;">첫 request만 upstream · 나머지는 bounded wait queue</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ iterative resolution / refresh</td></tr>
+            <tr><td style="background:#eef2ff;text-align:center;padding:13px;border:1px solid #c7d2fe;border-radius:8px;"><strong>④ Authority result</strong><br><span style="font-size:14px;">Positive RRset · NXDOMAIN/NODATA+SOA · resolution failure</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ key별 TTL·local clamp·expiry 저장</td></tr>
+            <tr><td style="background:#f7fafb;text-align:center;padding:13px;border:1px solid #cbd8de;border-radius:8px;"><strong>⑤ Response + cache state</strong><br><span style="font-size:14px;">fresh data, negative answer, failure response 또는 policy상 stale data</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↺ expiry 후 refresh · 성공 시 replace, 실패 시 backoff</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li>Resolver는 cache key와 현재 monotonic time을 비교한다. Wall clock 보정이 생겨도 expiry가 역행하지 않도록 monotonic clock 사용이 안전하다.</li>
+            <li>Fresh hit는 authority packet을 만들지 않는다. 응답 TTL은 저장 당시 값이 아니라 보통 경과 시간만큼 줄어든 값이다.</li>
+            <li>Miss가 몰리면 request coalescing으로 한 upstream lookup을 공유한다. Waiter 수·deadline을 제한하지 않으면 slow authority가 resolver memory와 latency를 묶는다.</li>
+            <li>Positive answer는 RRset TTL, NXDOMAIN/NODATA는 SOA 기반 negative TTL, resolution failure는 resolver policy와 RFC 9520 범위에 따라 별도 expiry를 갖는다.</li>
+            <li>Refresh 실패 시 serve-stale을 지원하는 resolver는 최근 good data를 제한적으로 반환할 수 있다. 이는 구현·설정 차이가 크므로 “TTL 만료 즉시 절대 사용 불가”라고 운영 현실을 단정하지 않는다.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">세 cache의 key와 expiry</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:28%;">종류</th><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">Key · expiry · failure window</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Positive RRset</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>&lt;name,type,class&gt;</code>. Authority TTL과 resolver max/min clamp를 적용한다. TTL 0은 현재 transaction 밖에서 cache하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">NXDOMAIN</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>&lt;QNAME,QCLASS&gt;</code>. SOA TTL과 SOA.MINIMUM 중 작은 값이 negative TTL 근거다. 이름 부재라 여러 QTYPE에 영향을 준다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">NODATA</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>&lt;QNAME,QTYPE,QCLASS&gt;</code>. 해당 type 부재만 cache한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Resolution failure</td><td style="padding:9px;border:1px solid #dbe3e8;">구현에 따라 query tuple, server IP, transport 등을 key로 삼는다. RFC 9520은 최소 1초, 최대 5분 범위와 persistent failure backoff를 요구·권고한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Stale retention</td><td style="padding:9px;border:1px solid #dbe3e8;">Fresh expiry와 별도 timer다. 만료 data를 memory에 더 보존하지만 refresh 실패·정책 조건에서만 제공하며 TTL 0 data는 stale 후보가 될 수 없다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">수치로 보는 TTL trade-off</h3>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;">
+            Client 10,000개가 한 이름을 30초마다 조회하면 cache가 없을 때 약 <strong>333 QPS</strong>다. 이들이 하나의 shared resolver를 쓰고 TTL 300초인 RRset을 완전히 공유한다고 단순화하면 authority refresh는 key당 약 <strong>0.0033 QPS</strong>다. 대신 cutover 후 그 resolver는 남은 TTL 동안 old answer를 줄 수 있다. 실제 QPS는 resolver 수, cache eviction, prefetch, ECS/view, type 수와 retry에 따라 증가한다.
+          </div>
+          <ul style="padding-left:22px;">
+            <li><strong>불변식:</strong> Cache hit는 authority의 현재 값을 재확인한 사건이 아니다. “지금도 원본이 같다”가 아니라 “아직 재사용 허용 시간 안”이라는 뜻이다.</li>
+            <li><strong>성공 확정:</strong> Resolver가 fresh answer를 저장하면 그 lookup은 완료되지만 application 연결은 아직 시작 전이다.</li>
+            <li><strong>비용:</strong> TTL을 300초에서 30초로 줄이면 단순 모델의 authority refresh QPS는 최대 10배가 될 수 있다. Capacity test 없이 낮추지 않는다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:27%;">판단</th><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">TTL 선택</td><td style="padding:9px;border:1px solid #dbe3e8;">변경 빈도, 허용 stale window, authority capacity, outage 시 cache 보호, rollback RTO를 수치로 놓고 선택한다. 모든 record에 동일 TTL을 쓰지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Cutover 준비</td><td style="padding:9px;border:1px solid #dbe3e8;">기존 긴 TTL을 먼저 낮춘 뒤 최소 그 기존 TTL만큼 기다린다. 그 다음 target 변경, canary 확인, 안정화 후 TTL을 복원한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Negative TTL</td><td style="padding:9px;border:1px solid #dbe3e8;">동적 service provisioning이 잦다면 실수·race의 복구 RTO를 고려해 관리한다. 너무 짧으면 typo·bot query가 authority load를 키운다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Stampede 방지</td><td style="padding:9px;border:1px solid #dbe3e8;">Request coalescing, prefetch, bounded jitter, queue/deadline, authority replica를 함께 쓴다. Jitter는 TTL 의미를 무제한 연장하지 않게 구현한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Serve stale</td><td style="padding:9px;border:1px solid #dbe3e8;">읽기 endpoint처럼 old IP가 안전한 경우 availability를 높인다. 폐기·보안 차단 대상 IP에는 stale이 위험할 수 있어 record별 정책과 최대 stale age를 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">관측</td><td style="padding:9px;border:1px solid #dbe3e8;">Cache hit/miss, entry age, eviction, coalesced waiter, refresh latency, stale served, RCODE·failure cache hit, authority QPS를 resolver/version별로 본다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border:1px solid #f0cf88;padding:14px 16px;">
+            <strong>Anti-pattern:</strong> 장애 때 전체 fleet의 DNS cache를 동시에 flush하지 않는다. Authority로 miss storm을 보내고 old/new 상태 증거도 지운다. 영향 key·resolver를 좁히고 capacity·rollback을 확인한 canary flush만 고려한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> API DNS cutover 5분 뒤에도 약 30% client가 old IP로 연결하고, 새로 만든 hostname은 일부 resolver에서 NXDOMAIN이다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:22%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">실행 내용</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>증상</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Resolver·region·QTYPE별 old/new 비율, NXDOMAIN 비율, 최초 query/변경 시각, old target traffic과 error를 분리한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>먼저 수집할 증거/지표</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Authoritative current TTL/serial, recursive answer의 remaining TTL·SOA, 변경 전 TTL 이력, cache hit/stale/failure 지표, old/new endpoint SLO와 query timestamp를 변경 전에 저장한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>가능한 가설</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Old long-TTL entry 잔존, TTL 하향 대기 누락, negative cache 잔존, resolver min/max clamp, serve-stale, split view, CNAME link별 다른 expiry.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>안전한 첫 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Old endpoint를 즉시 제거하지 말고 traffic을 유지하며 remaining TTL 최대치를 계산한다. 신규 NXDOMAIN은 authority를 고친 뒤 영향 resolver 하나에서 canary 재조회·선별 flush한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>Rollback/복구</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">새 endpoint SLO가 나쁘면 이전 RRset을 복원하고 양 endpoint를 최대 cache window 동안 병행한다. Resolver별 old/new/NXDOMAIN 감소를 확인한 후 old를 drain한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>하지 말아야 할 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Old endpoint 즉시 종료, TTL을 0으로 연속 변경, 전체 cache flush, authoritative 전부 restart, query retry 무제한 확대, 현재 zone TTL만 보고 과거 entry를 무시하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 two-tier cache 실습</h2>
+          <p><strong>목표:</strong> Local authority와 caching forwarder를 분리해 remaining TTL 감소와 “record를 만든 뒤에도 NXDOMAIN cache가 남는” 현상을 재현한다.</p>
+          <p><strong>사전 조건:</strong> Docker Desktop, 터미널 3개, 이 저장소. Port 5353/5354와 documentation address만 사용하며 host DNS는 변경하지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 먼저 예측 (3분)</h3>
+          <ol style="padding-left:22px;">
+            <li>동일 query 두 번째 응답의 TTL은 첫 번째보다 작을까, 다시 10이 될까?</li>
+            <li>NXDOMAIN을 cache한 뒤 authority에 record를 추가하면 즉시 보일까?</li>
+            <li>TTL 만료 순간 100개 client가 오면 coalescing이 없는 resolver에는 몇 개 upstream query가 생길 수 있을까?</li>
+          </ol>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · Authority와 cache 시작 (8분)</h3>
+          <p><strong>터미널 A · API container의 local authority:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            make up<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec api dnsmasq --no-daemon --port=5353 --listen-address=0.0.0.0 --bind-interfaces --no-resolv --local=/demo.test/ --local-ttl=10 --host-record=api.demo.test,192.0.2.10 --log-queries
+          </div>
+          <p><strong>터미널 B · client container의 caching forwarder:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dnsmasq --no-daemon --port=5354 --listen-address=127.0.0.1 --bind-interfaces --no-resolv --server=172.28.0.20#5353 --cache-size=100 --neg-ttl=10 --log-queries
+          </div>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · Positive cache와 TTL 감소 (7분)</h3>
+          <p><strong>터미널 C:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @127.0.0.1 -p 5354 api.demo.test A +noall +answer +stats<br>
+            3초 후 같은 명령을 다시 실행
+          </div>
+          <p><strong>예상 관찰:</strong> 첫 query는 authority까지 가고 cache에 들어간다. 두 번째는 client-side cache daemon에서 응답하며 TTL이 약 3초 줄어든다. 터미널 A에 두 번째 upstream query가 없다면 cache hit 증거다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입: NXDOMAIN 뒤 record 생성 (12분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @127.0.0.1 -p 5354 new.demo.test A +comments<br><br>
+            터미널 A에서 Control-C로 authority 종료 후 아래로 재시작<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec api dnsmasq --no-daemon --port=5353 --listen-address=0.0.0.0 --bind-interfaces --no-resolv --local=/demo.test/ --local-ttl=10 --host-record=api.demo.test,192.0.2.10 --host-record=new.demo.test,192.0.2.20 --log-queries<br><br>
+            즉시 client forwarder에 new.demo.test A를 다시 질의<br>
+            11초 후 같은 질의를 한 번 더 실행
+          </div>
+          <p><strong>예상 관찰:</strong> Authority에 새 A가 생겨도 즉시 query는 forwarder의 cached NXDOMAIN을 받을 수 있다. Negative TTL이 끝난 뒤 authority를 다시 조회하면서 <code>192.0.2.20</code>이 보인다. 이 lab의 <code>--neg-ttl=10</code>은 minimal dnsmasq local answer에 SOA가 없을 수 있어 시각화를 위한 local override이며, production authoritative negative answer는 SOA를 포함해야 한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오류 해결과 cleanup (5분)</h3>
+          <ul style="padding-left:22px;">
+            <li>5353/5354 충돌: 각 container에서 <code>ss -lunp</code>로 owner를 확인하고 두 high port를 함께 바꾼다.</li>
+            <li>두 번째 query가 authority에 감: 첫 command의 server/port와 forwarder <code>--cache-size</code>, RR TTL 0 여부를 확인한다.</li>
+            <li>Negative cache가 안 보임: dnsmasq version의 <code>--neg-ttl</code> 지원과 query name/type 일치를 확인한다. Resolver별 clamp·prefetch·stale 동작은 다르다.</li>
+          </ul>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            터미널 A와 B에서 Control-C<br>
+            make down
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>TTL은 refresh 주기가 아니다.</strong> Query가 없으면 expiry 때 자동 refresh하지 않을 수 있고 prefetch 구현은 반대로 만료 전에 refresh할 수 있다.</li>
+            <li><strong>Authoritative TTL과 client 관측 TTL이 같지 않을 수 있다.</strong> Recursive·OS·browser·application cache가 각자 clamp와 cache를 둘 수 있다.</li>
+            <li><strong>TTL을 낮추는 순간 기존 cache가 짧아지지 않는다.</strong> Old TTL window를 기다리는 rollout 단계가 반드시 필요하다.</li>
+            <li><strong>NXDOMAIN/NODATA와 resolution failure를 같은 negative로 뭉치지 않는다.</strong> 전자는 유용한 부재 응답, 후자는 answer를 얻지 못한 실패이며 key·expiry가 다르다.</li>
+            <li><strong>Serve stale은 공짜 availability가 아니다.</strong> 폐기된 endpoint·보안 차단·schema incompatibility를 되살릴 위험이 있다.</li>
+            <li><strong>Cache hit ratio가 높아도 안전하지 않을 수 있다.</strong> 오래된 wrong answer를 빠르게 제공해도 hit이며, age·RCODE·endpoint SLO를 함께 봐야 한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“DNS TTL을 1시간에서 1분으로 낮추면 어떤 일이 생깁니까?”</strong><br>좋은 답변 구조: 기존 cache 비소급 → authority QPS 수치 → recursive CPU/queue → consistency/rollback window → stampede/coalescing → resolver clamp·prefetch → 단계적 rollout.</li>
+            <li><strong>“Record를 만들었는데 일부 사용자는 계속 NXDOMAIN입니다. 진단하세요.”</strong><br>좋은 답변 구조: QNAME/QTYPE/view → authority current answer → recursive SOA/remaining negative TTL → NXDOMAIN key → resolver별 cache → safe canary flush → 최대 회복 시각.</li>
+            <li><strong>“Serve-stale 정책을 설계하세요.”</strong><br>좋은 답변 구조: availability requirement → data 안전성 분류 → refresh-first·timeout → max stale age → TTL 0 제외 → security/retired endpoint risk → metrics/alert → disable·rollback 조건.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>A와 AAAA가 독립 RRset이라는 사실이 장애 범위를 어떻게 나누는가?</li>
+            <li>CNAME owner가 다른 일반 data와 공존하면 안 되는 이유는?</li>
+            <li>NXDOMAIN과 NODATA의 cache key 차이는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① IPv4/IPv6 응답·path를 별도 진단한다. ② Resolver가 alias target으로 일관되게 query를 재시작하기 위한 불변식이다. ③ NXDOMAIN은 name/class, NODATA는 name/type/class다. 상태와 실무 영향까지 말하면 만점.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>TTL 3600을 60으로 바꾼 직후 기존 resolver entry가 60초 안에 만료되지 않는 이유는?</li>
+            <li>Positive, negative, resolution-failure cache의 expiry 근거는 어떻게 다른가?</li>
+            <li>TTL을 짧게 할 때 생기는 capacity 위험과 완화책은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 기존 entry는 저장 당시 TTL과 age로 expiry가 정해졌고 새 TTL은 다음 refresh부터 적용된다. ② RR TTL, SOA 기반 negative TTL, resolver failure-cache policy다. ③ Miss·authority QPS·stampede가 늘며 coalescing, prefetch/jitter, queue/deadline, capacity로 완화한다. 정의 1점, 흐름 1점, trade-off 1점으로 문항당 3점.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc1035.html" style="color:#0369a1;">RFC 1035 · RR TTL 정의와 TTL 0 의미</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc2308.html" style="color:#0369a1;">RFC 2308 · NXDOMAIN/NODATA negative cache와 SOA TTL</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc8767.html" style="color:#0369a1;">RFC 8767 · Serving stale data와 resiliency trade-off</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9520.html" style="color:#0369a1;">RFC 9520 · Resolution failure cache와 retry/backoff</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 11</strong><br>
+            <span>UDP/TCP DNS, EDNS, truncation — 같은 DNS message가 transport·payload size·TC bit에 따라 어떤 socket과 retry path로 전환되는지 packet 수준으로 살펴봅니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
