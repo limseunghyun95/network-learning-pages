@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-10T09:16:31+09:00",
+  "updatedAt": "2026-08-11T09:14:10+09:00",
   "lessons": [
     {
       "day": 1,
@@ -95,6 +95,15 @@
       "path": "day-10.html",
       "kind": "lesson",
       "publishedAt": "2026-08-10T09:16:31+09:00"
+    },
+    {
+      "day": 11,
+      "week": 2,
+      "title": "UDP/TCP DNS, EDNS, truncation",
+      "summary": "DNS message가 UDP payload budget을 넘을 때 EDNS 협상, TC=1, TCP framing·connection reuse로 전환되는 흐름과 MTU·fragmentation·방화벽 장애를 학습합니다.",
+      "path": "day-11.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-11T09:14:10+09:00"
     }
   ]
 }
