@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 12</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 2 / DAY 12</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">Split-horizon, search domain, service discovery</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">“같은 이름인데 왜 다른 IP인가?”를 namespace부터 socket까지 추적하기 · 예상 학습 50분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Application이 입력한 <code>orders</code>는 아직 DNS QNAME이 아니다. Stub resolver가 search list·ndots·trailing dot 정책으로 후보 이름을 만들고, 선택된 resolver/view가 client context에 맞는 answer를 반환한다. Service discovery는 그 answer를 endpoint·port·metadata로 바꾸지만 실제 성공은 새 socket이 올바른 target에 연결되고 application protocol이 응답해야 확정된다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:29%;font-weight:700;vertical-align:top;">FQDN</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Fully Qualified Domain Name. DNS root까지 지정한 완전한 이름이다. Text 표현의 마지막 점은 root label을 뜻해 <code>orders.example.com.</code>처럼 search suffix를 붙이지 않게 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Short name</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;"><code>orders</code>처럼 namespace가 생략된 이름. Local context 없이는 전역에서 하나로 해석되지 않으며 search policy가 실제 query 후보를 만든다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Search domain/list</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Short/relative name 뒤에 순서대로 붙여 볼 suffix 목록. DHCP, VPN, kubelet, OS 설정 등이 제공하며 순서 자체가 routing·보안 정책이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">ndots</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">이름에 점이 몇 개 있어야 absolute 후보를 먼저 시도할지 정하는 resolver option. 구체적 순서와 default는 libc·OS·runtime마다 다르며 RFC 공통 불변식이 아니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Split DNS / view</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">같은 zone/name에 query source·destination·type 같은 속성별로 다른 answer를 제공하는 구성. RFC 9499는 효과를 정의하지만 view 구현 자체는 표준 DNS 기능이 아니며 제품별 차이가 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Namespace</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">이름이 유일하고 유효한 범위. Kubernetes namespace, corporate internal zone, public zone은 서로 다른 이름 문맥을 만든다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Service discovery</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">“어떤 service instance가 어디에서 어떤 port·속성으로 제공되는가?”를 찾는 과정. 단순 A lookup보다 endpoint set, port, priority/weight, metadata와 변화 감지가 포함될 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">PTR / SRV / TXT</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">DNS-SD에서 PTR은 instance 목록, SRV는 priority·weight·port·target, TXT는 작은 key/value metadata를 제공한다. Target address는 다시 A/AAAA로 해석한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Endpoint readiness</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Endpoint가 새 요청을 받을 준비가 됐다는 control-plane 상태. DNS record 존재, port listen, application healthy는 서로 다른 성공 경계다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>개발 PC에서는 <code>db</code>가 되고 production에서는 안 되거나, VPN 안팎에서 같은 FQDN이 다른 IP를 돌려주는 문제는 “DNS가 랜덤하다”가 아니다. Client가 만든 QNAME 후보, 보낸 resolver, 적용된 view가 다르기 때문이다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Short name은 숨은 dependency다.</strong> Search list가 바뀌면 application config를 바꾸지 않아도 전혀 다른 FQDN과 trust domain으로 연결될 수 있다.</li>
+            <li><strong>Split DNS는 policy routing이다.</strong> 내부 client는 private IP, 외부 client는 public IP를 받을 수 있지만 cache/view 경계를 잘못 공유하면 내부 이름 누출이나 잘못된 endpoint 연결이 생긴다.</li>
+            <li><strong>Discovery와 연결은 다른 state machine이다.</strong> DNS가 endpoint를 찾았어도 route, NetworkPolicy, port, TLS certificate, application readiness가 실패할 수 있다.</li>
+            <li><strong>Search expansion은 query amplification이다.</strong> Suffix 수 × A/AAAA × retry × upstream 계층만큼 DNS QPS와 tail latency가 늘 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 이름→endpoint 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:separate;border-spacing:0 6px;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="background:#082f49;color:#fff;text-align:center;padding:13px;border-radius:8px;"><strong>① Application: getaddrinfo("orders")</strong><br><span style="font-size:14px;color:#d5edf7;">logical name · deadline t0</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ stub resolver policy</td></tr>
+            <tr><td style="background:#fff7e6;text-align:center;padding:13px;border:1px solid #f0cf88;border-radius:8px;"><strong>② Candidate QNAME 생성</strong><br><span style="font-size:14px;">orders.payments.svc.cluster.local. → orders.svc.cluster.local. → orders.</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ UDP/TCP query + source/resolver context</td></tr>
+            <tr><td style="background:#eef2ff;text-align:center;padding:13px;border:1px solid #c7d2fe;border-radius:8px;"><strong>③ Resolver route / authoritative view</strong><br><span style="font-size:14px;">inside·outside·tenant·namespace policy로 zone과 answer 선택</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ A/AAAA 또는 PTR→SRV/TXT→A/AAAA</td></tr>
+            <tr><td style="background:#edf8f2;text-align:center;padding:13px;border:1px solid #a8d8bd;border-radius:8px;"><strong>④ Discovery result</strong><br><span style="font-size:14px;">endpoint set + port + metadata + TTL · cache state</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ endpoint selection + route/ARP·ND</td></tr>
+            <tr><td style="background:#f7fafb;text-align:center;padding:13px;border:1px solid #cbd8de;border-radius:8px;"><strong>⑤ TCP/QUIC socket → TLS → application</strong><br><span style="font-size:14px;">connect queue · SNI/certificate · health · response timestamp</span></td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>t0:</strong> Application은 short name과 전체 request deadline을 소유한다. Resolver 호출 timeout이 deadline과 분리되면 DNS만 기다리다 상위 요청이 이미 취소될 수 있다.</li>
+            <li><strong>Candidate 생성:</strong> Stub은 search list와 ndots로 실제 QNAME 순서를 정한다. Trailing dot이 있는 FQDN은 search expansion을 막는 가장 명확한 입력이다.</li>
+            <li><strong>View 선택:</strong> Resolver/authoritative가 source IP 같은 query attribute로 answer를 결정한다. NAT·VPN·forwarder 때문에 authoritative가 보는 source는 application host와 다를 수 있다.</li>
+            <li><strong>Discovery:</strong> DNS-SD라면 PTR로 instance를 열거하고 SRV/TXT로 port·target·metadata를 얻은 뒤 target의 A/AAAA를 조회한다. Kubernetes Service DNS는 제품 convention이며 RFC 6763 browsing 전체와 동일하다고 가정하지 않는다.</li>
+            <li><strong>성공 확정:</strong> DNS는 endpoint 후보를 반환하면 끝이지만 user request는 socket connect, TLS identity, application response까지 가야 성공이다. 기존 connection pool은 DNS TTL이 끝나도 old endpoint 연결을 계속 재사용할 수 있다.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">State owner와 failure window</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:28%;">Owner</th><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">State · 불변식 · 실패 창</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">DHCP/VPN/kubelet</td><td style="padding:9px;border:1px solid #dbe3e8;">Nameserver, search list, ndots를 client namespace에 주입한다. Rogue/잘못된 suffix는 short name을 공격자나 다른 tenant domain으로 redirect할 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Stub/runtime</td><td style="padding:9px;border:1px solid #dbe3e8;">Candidate 순서, A/AAAA parallelism, retry와 negative result를 관리한다. glibc, musl, Go, JVM, browser가 OS 설정을 소비하는 방식은 같지 않다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Split resolver/view</td><td style="padding:9px;border:1px solid #dbe3e8;">Query context→zone/answer mapping과 cache를 소유한다. View가 다른 answer를 shared cache key 하나에 섞으면 cross-view contamination이 된다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Discovery control plane</td><td style="padding:9px;border:1px solid #dbe3e8;">Service registry·Kubernetes Service/EndpointSlice→DNS record를 reconcile한다. Readiness 변경부터 record 반영까지 eventual-consistency window가 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Client data plane</td><td style="padding:9px;border:1px solid #dbe3e8;">TTL cache, endpoint 선택, connection pool, retry를 소유한다. DNS에서 제거된 endpoint도 cached address와 existing connection 때문에 traffic을 받을 수 있다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">Query amplification을 수치로 보기</h3>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;">
+            Search suffix 3개와 absolute 후보 1개가 있고 application이 A와 AAAA를 모두 조회한다면 cache miss 한 번이 최대 <strong>4 후보 × 2 QTYPE = 8 logical DNS queries</strong>가 될 수 있다. 각 후보가 2회 retry하고 recursive가 여러 authority를 방문하면 packet 수는 더 커진다. <code>ndots:5</code> 환경의 <code>api.example.com</code>처럼 점이 5개보다 적은 이름은 구현에 따라 search 후보가 absolute보다 먼저 시도돼 불필요한 NXDOMAIN과 latency를 만들 수 있다.</div>
+          <ul style="padding-left:22px;">
+            <li><strong>Security invariant:</strong> DNSSEC은 “질의한 FQDN의 data가 검증됐다”를 보장할 수 있지만, rogue DHCP가 애초에 다른 search suffix를 선택하게 한 문제까지 자동 해결하지 않는다.</li>
+            <li><strong>SRV invariant:</strong> 낮은 priority를 먼저 사용하고 같은 priority 안에서 weight를 해석해야 한다. 배열의 첫 항목 고정 선택은 hot endpoint를 만든다.</li>
+            <li><strong>TLS invariant:</strong> 발견된 target IP/host와 사용자가 의도한 logical service identity를 구분해 SNI와 certificate hostname을 검증한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:27%;">판단</th><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">이름 선택</td><td style="padding:9px;border:1px solid #dbe3e8;">배포 config, certificate, cross-namespace·cross-trust 호출은 FQDN을 사용한다. Short name은 관리된 local namespace에서만 쓰고 expansion 결과를 테스트한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Search 정책</td><td style="padding:9px;border:1px solid #dbe3e8;">Suffix 수와 순서를 최소화하고 명시적으로 배포한다. ndots 변경 전 QPS·NXDOMAIN·latency를 runtime별로 측정하며 DHCP가 수동 DNS 설정을 덮지 않게 한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Split DNS</td><td style="padding:9px;border:1px solid #dbe3e8;">Zone ownership, view match 조건, forward route, cache namespace, DNSSEC 정책을 문서화한다. Inside/outside/VPN/IPv4/IPv6에서 같은 test matrix를 자동화한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Discovery schema</td><td style="padding:9px;border:1px solid #dbe3e8;">A/AAAA만 필요한지, SRV priority·weight·port와 TXT version까지 필요한지 client capability로 정한다. TXT를 secret 저장소나 큰 config blob으로 쓰지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Lifecycle</td><td style="padding:9px;border:1px solid #dbe3e8;">Ready 전 publish 금지, drain→record 제거→TTL/negative cache→connection pool max lifetime 순으로 old endpoint traffic의 상한을 계산한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">Original input, expanded QNAME, search index, selected resolver/view, answer/TTL, registry revision, chosen endpoint, connect/TLS/app timing을 같은 request trace와 timestamp로 연결한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border:1px solid #f0cf88;padding:14px 16px;">
+            <strong>Anti-pattern:</strong> “내부 DNS니까 안전하다”며 같은 FQDN의 public/private record를 사람 손으로 따로 관리하지 않는다. Ownership·reconciliation·diff check가 없으면 view drift와 certificate·rollback 불일치가 누적된다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> <code>checkout</code>은 같은 namespace에서 되지만 다른 namespace와 VPN 밖에서는 NXDOMAIN 또는 public IP를 반환하고, 일부 client는 private IP 연결 timeout이다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:22%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">실행 내용</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>증상</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Client namespace·VPN·subnet·runtime별 original name, 실제 QNAME, resolver IP, answer, RCODE, chosen endpoint와 connect result를 분리한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>먼저 수집할 증거/지표</strong></td><td style="padding:8px;border:1px solid #dbe3e8;"><code>/etc/resolv.conf</code>·OS DNS config, ndots/search order, <code>dig +search</code> question, FQDN direct query, inside/outside authoritative answer, resolver logs/cache, Service·EndpointSlice readiness, TTL, route/flow log, pool connection age와 timestamp를 저장한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>가능한 가설</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">잘못된 search suffix/namespace, trailing dot 차이, VPN DNS route 누락, NAT 때문에 잘못된 view match, shared cache leakage, split zone drift, stale/negative cache, EndpointSlice publish 지연, old pooled connection.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>안전한 첫 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">영향 client 하나에서 intended FQDN을 direct query하고 올바른 resolver를 명시해 비교한다. Config는 canary에 FQDN으로 고정하고 wrong-view traffic을 차단하기 전 endpoint capacity와 rollback을 확인한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>Rollback/복구</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">최근 VPN/search/view/CoreDNS 변경을 known-good으로 되돌리고 두 view record를 reconcile한다. TTL·pool lifetime 동안 old/new endpoint를 병행하고 QNAME·answer·connect 성공률로 수렴을 확인한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>하지 말아야 할 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">전체 cache flush, search suffix 무작정 추가, public/private zone 동시 수동 편집, DNSSEC/TLS 검증 해제, 모든 Pod restart, retry 무제한 확대, DNS 성공만 보고 NetworkPolicy·port·readiness 조사를 끝내지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 두 DNS view·search·SRV 실습</h2>
+          <p><strong>목표:</strong> 같은 FQDN이 resolver view별로 다른 endpoint가 되고, short name이 search suffix로 확장되며, SRV port를 무시하면 연결이 실패하는 과정을 재현한다.</p>
+          <p><strong>사전 조건:</strong> Docker Desktop과 이 저장소. 기존 lab의 documentation network만 사용하며 host DNS 설정은 바꾸지 않는다. 터미널 3개를 연다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 먼저 예측 (3분)</h3>
+          <ol style="padding-left:22px;">
+            <li>같은 <code>checkout.svc.test.</code>를 두 resolver에 묻으면 cache key만 같으니 같은 IP여야 할까?</li>
+            <li><code>checkout</code>과 <code>checkout.</code>은 search list에서 같은 QNAME sequence를 만들까?</li>
+            <li>A record가 성공하면 8000과 8080 중 어느 port가 열렸는지 알 수 있을까?</li>
+          </ol>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · Lab과 두 view 시작 (10분)</h3>
+          <p><strong>터미널 A · internal view:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            make up<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec api dnsmasq --no-daemon --port=5353 --listen-address=0.0.0.0 --bind-interfaces --no-resolv --local=/svc.test/ --host-record=checkout.svc.test,172.28.0.20 --srv-host=_http._tcp.checkout.svc.test,checkout.svc.test,8000,10,50 --txt-record=checkout.svc.test,view=internal --log-queries
+          </div>
+          <p><strong>터미널 B · external view 모형:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec web dnsmasq --no-daemon --port=5353 --listen-address=0.0.0.0 --bind-interfaces --no-resolv --local=/svc.test/ --host-record=checkout.svc.test,172.28.0.30 --srv-host=_http._tcp.checkout.svc.test,checkout.svc.test,8080,10,50 --txt-record=checkout.svc.test,view=external --log-queries
+          </div>
+          <p>이 lab은 source-based dispatcher 대신 서로 다른 resolver 주소로 두 view를 명시해 같은 effect를 안전하게 모델링한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · Same FQDN, different view와 search (8분)</h3>
+          <p><strong>터미널 C:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @172.28.0.20 -p 5353 checkout.svc.test A +short<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @172.28.0.30 -p 5353 checkout.svc.test A +short<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @172.28.0.20 -p 5353 checkout +domain=svc.test +search +noall +question +answer<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @172.28.0.20 -p 5353 checkout. +domain=svc.test +search +noall +question +comments
+          </div>
+          <p><strong>예상 관찰:</strong> 같은 FQDN이 internal <code>172.28.0.20</code>, external 모형 <code>172.28.0.30</code>으로 갈린다. Short name은 <code>checkout.svc.test.</code>로 확장되지만 trailing dot의 <code>checkout.</code>은 suffix가 붙지 않는다. 마지막 RCODE는 dnsmasq version/config에 따라 달라도 QUESTION의 QNAME이 핵심 증거다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입: SRV port 무시 (9분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @172.28.0.20 -p 5353 _http._tcp.checkout.svc.test SRV +short<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @172.28.0.20 -p 5353 checkout.svc.test TXT +short<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client nc -vz -w 2 172.28.0.20 8080<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client nc -vz -w 2 172.28.0.20 8000
+          </div>
+          <p><strong>예상 관찰:</strong> A lookup은 IP만 주므로 wrong port 8080은 refused/timeout이고, SRV가 광고한 8000은 API listener에 연결된다. DNS discovery success와 application health success는 아직 다르므로 이후 HTTP request까지 확인해야 완전하다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오류 해결과 cleanup (5분)</h3>
+          <ul style="padding-left:22px;">
+            <li>Image 없음: <code>docker compose -f labs/basic-network-observability/docker-compose.yml build client</code> 후 <code>make up</code>을 다시 실행한다.</li>
+            <li>5353 bind 실패: 각 container의 <code>ss -lunpt</code>로 owner를 보고 두 view port를 같은 unused high port로 바꾼다.</li>
+            <li>Short name이 확장되지 않음: <code>dig</code>의 <code>+domain</code>/<code>+search</code> 지원과 QUESTION을 확인한다. <code>getaddrinfo</code>와 dig의 동작이 완전히 같다고 가정하지 않는다.</li>
+            <li>두 view가 같은 IP: query한 <code>@server</code> 주소와 터미널 A/B의 <code>--host-record</code>, query log를 확인한다.</li>
+          </ul>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            터미널 A와 B에서 Control-C<br>
+            make down
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Split DNS와 Geo DNS를 같은 말로 쓰지 않는다.</strong> 둘 다 다른 answer를 줄 수 있지만 match input, trust boundary, 목적이 다르다.</li>
+            <li><strong>Authoritative가 application source IP를 본다고 가정하지 않는다.</strong> Recursive resolver, forwarder, NAT가 source context를 바꾼다.</li>
+            <li><strong><code>ndots:5</code>를 Kubernetes의 영원한 불변식으로 외우지 않는다.</strong> Cluster/runtime/config에 따라 다르며 Pod의 실제 <code>/etc/resolv.conf</code>를 본다.</li>
+            <li><strong>Search NXDOMAIN을 service 부재로 단정하지 않는다.</strong> Intended FQDN을 direct query해 namespace expansion 문제와 record 부재를 분리한다.</li>
+            <li><strong>SRV weight를 load balancer health check로 오해하지 않는다.</strong> Weight는 selection hint이며 현재 endpoint health를 보증하지 않는다.</li>
+            <li><strong>Headless Service endpoint set을 connection-level load balancing으로 오해하지 않는다.</strong> Client cache와 pool 때문에 한 endpoint에 오래 고정될 수 있다.</li>
+            <li><strong>TXT에 secret을 넣지 않는다.</strong> DNS metadata는 cache·log·packet capture에 넓게 노출될 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“같은 도메인이 회사 안팎에서 다른 IP를 주는 구조를 설계하세요.”</strong><br>좋은 답변 구조: 요구사항·trust boundary → query source/forward path → split zone/view/cache ownership → private/public TLS·route → TTL/rollback → leak·drift test → observability.</li>
+            <li><strong>“Kubernetes에서 short service name이 느립니다. 왜일까요?”</strong><br>좋은 답변 구조: Pod resolv.conf·ndots → candidate QNAME 수 × A/AAAA × retry 계산 → NXDOMAIN/cache/CoreDNS QPS → FQDN canary → suffix/ndots/runtime trade-off.</li>
+            <li><strong>“DNS 기반 service discovery의 endpoint lifecycle을 설명하세요.”</strong><br>좋은 답변 구조: registry/readiness → DNS reconcile → PTR/SRV/TXT/A·AAAA → TTL/cache → selection → socket/TLS/app → drain/pool lifetime → failure·rollback.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>EDNS UDP payload size가 path 전달을 보장하지 않는 이유는?</li>
+            <li>TC=1 이후 TCP DNS message 경계는 어떻게 복원하는가?</li>
+            <li>작은 A는 되는데 DNSKEY만 실패할 때 첫 두 실험은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 광고 size와 PMTU·fragment/middlebox 정책이 다르다. ② 2-octet length prefix만큼 byte stream을 모은다. ③ <code>+ignore +bufsize=512</code>로 TC를 보고 <code>+tcp</code>로 TCP 53을 독립 검증한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li><code>orders</code>가 실제 DNS packet의 QNAME이 되기 전에 어떤 state가 개입하는가?</li>
+            <li>DNSSEC이 rogue search suffix redirect를 자동으로 막지 못하는 이유는?</li>
+            <li>Discovery에서 endpoint가 제거된 뒤에도 traffic이 남는 네 가지 window는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Stub/runtime의 search list·ndots·trailing-dot policy다. ② 공격자가 선택시킨 다른 FQDN도 정당하게 signed될 수 있기 때문이다. ③ Control-plane reconcile, DNS TTL/cache, client endpoint cache, existing connection pool/drain window다. 정의 1점, state 흐름 1점, 장애·trade-off 1점으로 문항당 3점.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9499.html" style="color:#0369a1;">RFC 9499 · Split DNS와 view 용어</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc3397.html" style="color:#0369a1;">RFC 3397 · DHCP Domain Search Option과 보안 경계</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc6763.html" style="color:#0369a1;">RFC 6763 · PTR/SRV/TXT 기반 DNS Service Discovery</a></li>
+            <li><a href="https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/" style="color:#0369a1;">Kubernetes 공식 문서 · Service/Pod DNS와 search namespace</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 13</strong><br>
+            <span><code>dig</code> trace와 DNS 장애 통합 랩 — NXDOMAIN, timeout, stale cache, truncation, wrong view를 제한 시간 안에 packet·resolver·application 증거로 분리합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

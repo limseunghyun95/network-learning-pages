@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-11T09:14:10+09:00",
+  "updatedAt": "2026-08-12T09:00:22+09:00",
   "lessons": [
     {
       "day": 1,
@@ -104,6 +104,15 @@
       "path": "day-11.html",
       "kind": "lesson",
       "publishedAt": "2026-08-11T09:14:10+09:00"
+    },
+    {
+      "day": 12,
+      "week": 2,
+      "title": "split-horizon, search domain, service discovery",
+      "summary": "Short name이 search list로 QNAME 후보가 되고 DNS view가 answer를 선택한 뒤, SRV·A/AAAA·TXT와 readiness·connection state가 실제 서비스 연결로 이어지는 흐름을 학습합니다.",
+      "path": "day-12.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-12T09:00:22+09:00"
     }
   ]
 }
