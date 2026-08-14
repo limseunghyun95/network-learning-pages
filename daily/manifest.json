@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-12T09:00:22+09:00",
+  "updatedAt": "2026-08-14T09:19:41+09:00",
   "lessons": [
     {
       "day": 1,
@@ -113,6 +113,15 @@
       "path": "day-12.html",
       "kind": "lesson",
       "publishedAt": "2026-08-12T09:00:22+09:00"
+    },
+    {
+      "day": 13,
+      "week": 2,
+      "title": "랩: dig trace와 DNS 장애",
+      "summary": "dig의 delegation trace와 header·section·timing을 읽고 NXDOMAIN·NODATA·timeout·SERVFAIL·TC/TCP·stale·wrong-view 장애를 증거 기반으로 분리하는 통합 랩입니다.",
+      "path": "day-13.html",
+      "kind": "lab",
+      "publishedAt": "2026-08-14T09:19:41+09:00"
     }
   ]
 }

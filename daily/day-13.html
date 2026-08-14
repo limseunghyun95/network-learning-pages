@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 13</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 2 / DAY 13 · INTEGRATION LAB</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">랩: dig trace와 DNS 장애</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">RCODE 하나로 단정하지 않고 packet·cache·transport·view를 분리하기 · 예상 학습 45분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            DNS 장애 진단은 “<code>dig</code>가 실패했다”가 아니라 <strong>어떤 QNAME/QTYPE을 어느 resolver에 어떤 transport로 보냈고, 어느 delegation·cache·view 상태에서 어떤 RCODE/flag/section/timestamp를 받았는가</strong>를 재구성하는 일이다. NXDOMAIN은 유용한 부재 응답, timeout은 응답 부재, SERVFAIL은 해석 실패, TC=1은 TCP 전환 신호다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:29%;font-weight:700;vertical-align:top;">Recursive query</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client가 resolver에게 최종 answer까지 대신 찾아 달라고 요청하는 방식. 보통 query의 RD bit로 의사를 표시한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Iterative query / trace</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Root→TLD→authoritative referral을 client가 단계별로 따라가는 방식. <code>dig +trace</code>는 cold-cache recursive 동작을 완전히 복제하지는 않지만 delegation path를 관찰하게 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">RCODE</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">DNS response status code. NOERROR, NXDOMAIN, SERVFAIL, REFUSED 등이 있으며 HTTP status와는 별개다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">AA / RD / RA / TC</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">AA는 authoritative answer, RD는 recursion 요청, RA는 recursion 제공 가능, TC는 message truncation을 뜻하는 header flag다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Answer / Authority / Additional</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Answer는 질의 결과, Authority는 delegation 또는 negative SOA 같은 권한 정보, Additional은 관련 address·OPT 등 보조 data를 담는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">NXDOMAIN / NODATA</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">NXDOMAIN은 이름 자체가 없음, NODATA는 이름은 있지만 요청 type RRset이 없음이다. NODATA는 별도 RCODE가 아니라 NOERROR와 빈 Answer·SOA 등으로 추론한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SERVFAIL</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Resolver/server가 query를 처리하지 못했다는 유용한 실패 응답. DNSSEC validation, authority timeout, lame delegation, loop 등 여러 원인이므로 RCODE만으로 root cause를 확정하지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Timeout / deadline</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Timeout은 일정 구간 응답을 못 받은 사건, deadline은 전체 작업이 끝나야 하는 절대 시각이다. UDP loss, firewall, route, overload를 모두 포함할 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Stale cache</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Fresh TTL이 끝났지만 resolver 정책상 제한적으로 보존·제공되는 과거 data. 단순 cache hit와 구별하려면 age·TTL·refresh failure 지표가 필요하다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>“DNS 문제 같습니다”는 진단이 아니라 시작점이다. 같은 사용자 증상도 상태 전이는 완전히 다르다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>NXDOMAIN:</strong> Packet 왕복과 resolver 처리는 성공했다. 이름 부재라는 state가 negative TTL 동안 cache될 수 있다.</li>
+            <li><strong>Timeout:</strong> Answer가 없다는 사실만 안다. Query 미전송, outbound drop, authority overload, return-path loss를 아직 구분하지 못한다.</li>
+            <li><strong>SERVFAIL:</strong> 응답은 왔지만 resolution state machine이 useful answer에 도달하지 못했다. 무제한 retry는 failure cache를 무력화하고 upstream을 압박한다.</li>
+            <li><strong>Wrong answer:</strong> 가장 위험한 장애다. Fast NOERROR라도 wrong view·stale RR·search suffix 때문에 다른 service에 연결될 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 evidence flow</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:separate;border-spacing:0 6px;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="background:#082f49;color:#fff;text-align:center;padding:13px;border-radius:8px;"><strong>① Input 확정</strong><br><span style="font-size:14px;color:#d5edf7;">name→QNAME · QTYPE · resolver IP · view · deadline · t0</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ local config/cache 분리</td></tr>
+            <tr><td style="background:#fff7e6;text-align:center;padding:13px;border:1px solid #f0cf88;border-radius:8px;"><strong>② Recursive query와 direct/trace 비교</strong><br><span style="font-size:14px;">stub→recursive cache path │ root→TLD→authority delegation path</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ header + sections + timing</td></tr>
+            <tr><td style="background:#eef2ff;text-align:center;padding:13px;border:1px solid #c7d2fe;border-radius:8px;"><strong>③ Branch</strong><br><span style="font-size:14px;">NOERROR/NXDOMAIN/SERVFAIL/REFUSED │ no response │ TC=1</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ hypothesis를 packet·server metric으로 검증</td></tr>
+            <tr><td style="background:#edf8f2;text-align:center;padding:13px;border:1px solid #a8d8bd;border-radius:8px;"><strong>④ Safe action</strong><br><span style="font-size:14px;">FQDN/direct server/TCP canary · rollback · TTL·pool window 유지</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ DNS success 후 data path 계속</td></tr>
+            <tr><td style="background:#f7fafb;text-align:center;padding:13px;border:1px solid #cbd8de;border-radius:8px;"><strong>⑤ route→ARP/NDP→socket→TLS→application</strong><br><span style="font-size:14px;">DNS 성공 시각과 connect/app 성공 시각을 분리</span></td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>Input:</strong> <code>api</code>가 아니라 packet에 들어간 FQDN, A/AAAA/SRV type, source namespace, resolver 주소를 기록한다.</li>
+            <li><strong>Recursive vs trace:</strong> Recursive 성공·trace 실패는 direct outbound 53 차단일 수 있고, recursive 실패·authoritative direct 성공은 resolver cache/policy/DNSSEC path를 의심한다.</li>
+            <li><strong>Response branch:</strong> RCODE뿐 아니라 AA/RD/RA/TC, Answer/Authority의 SOA·NS, response size, SERVER, Query time을 한 묶음으로 읽는다.</li>
+            <li><strong>Transport:</strong> TC=1이면 partial RR을 완료로 cache하지 않고 TCP 53을 검증한다. Timeout이면 양쪽 capture 없이는 어느 방향 packet이 사라졌는지 모른다.</li>
+            <li><strong>End-to-end:</strong> DNS answer는 address 후보만 확정한다. 기존 connection pool이 old IP를 재사용하면 새 DNS 결과가 있어도 traffic은 즉시 이동하지 않는다.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">상태별 증거와 success boundary</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:27%;">관측</th><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">확정되는 것 / 아직 모르는 것</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">NOERROR + Answer</td><td style="padding:9px;border:1px solid #dbe3e8;">해당 responder가 RRset을 제공했다. 현재 authoritative와 같은지, 올바른 view인지, endpoint가 연결 가능한지는 별도다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">NXDOMAIN + SOA</td><td style="padding:9px;border:1px solid #dbe3e8;">QNAME 부재를 cache할 근거가 있다. Search expansion·wrong view로 의도와 다른 QNAME을 물었는지는 아직 모른다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">NOERROR + empty Answer + SOA</td><td style="padding:9px;border:1px solid #dbe3e8;">대개 NODATA다. 이름은 존재하지만 요청 type이 없다. NXDOMAIN과 cache key·영향 범위가 다르다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">SERVFAIL</td><td style="padding:9px;border:1px solid #dbe3e8;">Useful answer를 만들지 못했다. DNSSEC bogus, authority timeout, delegation 오류 중 어느 것인지는 resolver log/EDE/direct query가 필요하다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">No servers reached</td><td style="padding:9px;border:1px solid #dbe3e8;">Client deadline 안에 response를 못 받았다. Packet capture와 flow log 전에는 server failure라고 단정하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">TC=1</td><td style="padding:9px;border:1px solid #dbe3e8;">UDP path와 responder는 도달했고 complete message가 예산을 넘었다. TCP fallback 성공 여부는 아직 모른다.</td></tr>
+          </table>
+          <h3 style="font-size:18px;color:#075985;">Retry work budget</h3>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;">
+            Search 후보 4개 × A/AAAA 2개 × resolver 2개 × 각 2회 시도면 application lookup 하나가 최대 <strong>32 stub→resolver query attempts</strong>가 될 수 있다. Recursive 내부에서 authority 3개를 시도하면 packet work는 더 커진다. RFC 1035도 per-server retransmit뿐 아니라 request 전체 work counter가 필요하다고 설명한다. 따라서 timeout을 늘리는 것보다 후보·retry·deadline의 소유자를 먼저 줄인다.
+          </div>
+          <ul style="padding-left:22px;">
+            <li><strong>Cache 불변식:</strong> Cache hit는 current authority를 방금 확인했다는 뜻이 아니다. Remaining TTL과 resolver identity를 함께 기록한다.</li>
+            <li><strong>Negative 불변식:</strong> NXDOMAIN은 <code>&lt;QNAME,QCLASS&gt;</code>, NODATA는 <code>&lt;QNAME,QTYPE,QCLASS&gt;</code> 범위로 생각한다.</li>
+            <li><strong>Stale 불변식:</strong> Stale 제공은 fresh TTL과 별도 정책이다. Answer만 보고 stale 여부를 완전히 판정할 수 없으므로 resolver metric/log가 필요하다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:27%;">판단</th><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">첫 명령</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>dig @resolver FQDN QTYPE +comments +stats</code>처럼 input과 server를 고정한다. <code>+short</code>만 쓰면 flags·SOA·timing 증거를 잃는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">비교 축</td><td style="padding:9px;border:1px solid #dbe3e8;">Recursive/direct-authority, UDP/TCP, internal/external resolver, A/AAAA, cached/cold를 한 번에 하나씩 바꾼다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">증거 보존</td><td style="padding:9px;border:1px solid #dbe3e8;">UTC/KST timestamp, command, client/VPN/namespace, SERVER, RCODE/flags/sections/TTL/size/time, pcap 위치를 incident timeline에 남긴다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Safe mitigation</td><td style="padding:9px;border:1px solid #dbe3e8;">FQDN·known-good resolver·TCP를 canary에만 고정하고 endpoint capacity·TLS identity를 검증한다. 전체 cache flush는 마지막 수단이다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Alert</td><td style="padding:9px;border:1px solid #dbe3e8;">QTYPE/zone/view별 RCODE, timeout, TC/TCP fallback, cache hit/stale, resolution latency, authority QPS와 application connect error를 함께 본다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Privacy</td><td style="padding:9px;border:1px solid #dbe3e8;">Pcap·query log에는 내부 hostname·tenant·사용 행태가 드러난다. 영향 interface/filter/time window를 최소화하고 secret·개인정보를 마스킹한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border:1px solid #f0cf88;padding:14px 16px;"><strong>Anti-pattern:</strong> <code>nslookup</code>, browser, application 결과가 서로 다르다고 “DNS cache를 전부 지우자”로 시작하지 않는다. 각 도구가 다른 resolver API·cache·search policy를 소유할 수 있으므로 QNAME과 SERVER부터 맞춘다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> 배포 직후 일부 region에서 API hostname은 NXDOMAIN, 일부는 old IP, DNSSEC query는 timeout이며 재시도로 CoreDNS QPS가 급증한다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:22%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">실행 내용</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>증상</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Region/view/runtime/QNAME/QTYPE별 NXDOMAIN·old IP·timeout·SERVFAIL 비율과 application connect error를 분리한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>먼저 수집할 증거/지표</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">resolv.conf/search, recursive와 authority direct dig 원문, SOA·remaining TTL, TC/TCP 결과, resolver cache/stale/failure metric, authority serial/QPS, pcap·flow log, deployment·DNS 변경 timestamp를 저장한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>가능한 가설</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Search/wrong view, negative cache, TTL 하향 대기 누락, stale serve, split zone serial drift, fragment/TCP 53 차단, DNSSEC validation failure, resolver overload와 retry storm.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>안전한 첫 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">영향 client 하나에서 intended FQDN·known-good resolver·TCP를 canary 비교하고 retry를 bounded backoff로 줄인다. Old endpoint는 TTL/pool window 동안 유지한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>Rollback/복구</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">최근 zone/view/resolver/network policy를 known-good으로 복원하고 serial·DNSSEC·UDP/TCP를 검증한다. Resolver별 old/NXDOMAIN/stale 감소와 application SLO를 확인한 뒤 old endpoint를 drain한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>하지 말아야 할 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">전체 cache flush, 모든 resolver restart, TTL 0 남발, DNSSEC 검증 해제, timeout·retry 무제한 확대, old endpoint 즉시 종료, pcap 무제한 수집, RCODE 하나로 원인을 확정하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 제한시간 통합 랩</h2>
+          <p><strong>목표:</strong> Public test 대상만 사용해 정상 delegation, NXDOMAIN, timeout, UDP truncation/TCP fallback을 재현하고 1페이지 incident note를 만든다.</p>
+          <p><strong>사전 조건:</strong> macOS/Linux의 <code>dig</code>, 인터넷, 공개 resolver <code>1.1.1.1</code>. 회사 정책상 외부 DNS가 차단되면 승인 resolver로 바꾼다. <code>192.0.2.1</code>은 문서용 TEST-NET-1 주소다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 먼저 예측 (3분)</h3>
+          <ol style="padding-left:22px;">
+            <li><code>+trace</code> 출력에서 root·TLD·authoritative를 무엇으로 구분할까?</li>
+            <li>NXDOMAIN과 timeout 중 어느 쪽이 packet 왕복 성공 증거인가?</li>
+            <li>TC=1 응답의 Answer section 일부를 cache해도 될까?</li>
+          </ol>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · 정상 baseline과 delegation trace (8분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            date -u<br>
+            dig @1.1.1.1 example.com A +comments +stats<br>
+            dig example.com A +trace +comments +stats
+          </div>
+          <p><strong>예상 관찰:</strong> Recursive answer에는 <code>rd ra</code>와 최종 A가 보인다. Trace는 root NS→<code>com.</code> referral→<code>example.com.</code> authoritative answer를 따라간다. Network가 direct UDP 53을 막으면 recursive는 성공해도 trace는 실패할 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · 실패 주입 A: NXDOMAIN vs timeout (8분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            dig @1.1.1.1 missing.day13.invalid. A +comments +authority +stats<br>
+            dig @192.0.2.1 example.com A +time=2 +tries=1 +comments +stats
+          </div>
+          <p><strong>예상 관찰:</strong> 첫 명령은 NXDOMAIN과 negative SOA를 받아 “없음”이 확정된다. 두 번째는 deadline 후 no servers reached가 되어 “응답을 못 받음”만 확정한다. 환경에서 192.0.2.1이 즉시 reject되더라도 NXDOMAIN과 다른 network failure라는 분기는 유지된다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입 B: TC와 TCP fallback (8분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            dig @1.1.1.1 org DNSKEY +dnssec +bufsize=512 +ignore +comments +stats<br>
+            dig @1.1.1.1 org DNSKEY +dnssec +bufsize=512 +comments +stats<br>
+            dig @1.1.1.1 org DNSKEY +dnssec +tcp +comments +stats
+          </div>
+          <p><strong>예상 관찰:</strong> <code>+ignore</code> 명령은 <code>tc</code>와 작은 incomplete response를 보여준다. 다음 명령은 <code>Truncated, retrying in TCP mode.</code> 후 complete answer를 받고, 마지막 명령은 처음부터 TCP를 사용한다. DNSKEY 크기는 변할 수 있으므로 TC가 재현되지 않으면 다른 DNSSEC zone을 사용하고 관측 차이를 기록한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · Incident note와 cleanup (8분)</h3>
+          <p>각 실험을 아래 7열로 한 줄씩 적는다: <strong>UTC 시각 | client context | QNAME/QTYPE | SERVER/transport | RCODE/flags | section·TTL·size·latency | 다음 안전한 실험</strong>.</p>
+          <ul style="padding-left:22px;">
+            <li><code>dig</code> 없음: macOS 기본 도구 또는 배포판의 bind-utils/dnsutils를 사용한다.</li>
+            <li>Trace만 timeout: corporate egress가 direct root/TLD DNS를 차단할 수 있다. 승인 recursive query와 혼동하지 않는다.</li>
+            <li>NXDOMAIN에 SOA가 안 보임: <code>+authority</code>와 <code>+noall +comments +authority</code>를 비교하고 resolver 정책을 기록한다.</li>
+            <li>Cleanup: 이 lab은 파일·DNS 설정을 변경하지 않는다. Terminal 기록에 내부 hostname을 넣지 않았는지 확인하고 민감한 pcap을 만들지 않는다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong><code>+trace</code>가 production recursive resolver의 cache·policy·DNSSEC 동작을 그대로 재현한다고 보지 않는다.</strong> Delegation path 도구다.</li>
+            <li><strong><code>+short</code>만 캡처하지 않는다.</strong> RCODE, AA/TC, SOA, SERVER, size, time이 사라진다.</li>
+            <li><strong>NXDOMAIN, NODATA, SERVFAIL, timeout을 모두 “DNS 실패”로 합치지 않는다.</strong> Cache와 retry 정책이 다르다.</li>
+            <li><strong>Public resolver와 corporate resolver 결과 차이를 오염이라고 단정하지 않는다.</strong> Split DNS와 policy가 의도일 수 있다.</li>
+            <li><strong>Stale answer를 TTL만으로 확정하지 않는다.</strong> Resolver가 stale response TTL을 어떻게 표시하는지는 구현 차이가 있으며 refresh log·metric이 필요하다.</li>
+            <li><strong>Client packet capture 한 곳만으로 server가 안 받았다고 단정하지 않는다.</strong> NAT·firewall·return path의 관측 위치를 표시한다.</li>
+            <li><strong>DNS 복구 후 incident를 종료하지 않는다.</strong> Old IP connection pool, TLS, application error가 남았는지 확인한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“<code>dig +trace</code>가 실패하지만 일반 <code>dig</code>는 됩니다. 설명하세요.”</strong><br>좋은 답변 구조: recursive vs iterative data path → direct outbound UDP/TCP 53 정책 → cache/view 차이 → root/TLD reachability → capture 위치 → 안전한 확인.</li>
+            <li><strong>“NXDOMAIN과 timeout을 운영적으로 어떻게 다르게 처리합니까?”</strong><br>좋은 답변 구조: useful negative vs no response → SOA/negative TTL → retry eligibility → authority/network evidence → user impact → rollback·cache window.</li>
+            <li><strong>“DNS 장애 때 retry storm을 막는 resolver/client 정책을 설계하세요.”</strong><br>좋은 답변 구조: QPS·suffix·QTYPE·resolver 수 가정 → per-request work budget → failure cache → exponential backoff+jitter → coalescing/deadline → fallback/alternative server → SLO·load shedding.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Short name이 packet QNAME이 되기 전 누가 후보 순서를 정하는가?</li>
+            <li>Split DNS view가 shared cache에서 섞이면 어떤 문제가 생기는가?</li>
+            <li>DNS에서 endpoint를 제거한 뒤에도 traffic이 남는 네 가지 window는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Stub/runtime의 search list·ndots 정책. ② Cross-view cache contamination으로 다른 trust domain의 answer가 노출된다. ③ Control-plane reconcile, DNS TTL/cache, client endpoint cache, connection pool/drain window다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>NXDOMAIN response가 timeout보다 더 많이 확정해 주는 것은?</li>
+            <li>Recursive query 성공·trace 실패에서 세울 첫 가설은?</li>
+            <li>TC=1을 본 뒤 complete DNS success를 확정하는 시점은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Query/response path와 responder 처리가 성공했고 이름 부재가 SOA TTL로 cache될 수 있음을 안다. ② Client의 direct root/TLD UDP/TCP 53 egress 차단 또는 path 차이다. ③ TCP에서 length-prefixed 전체 message를 받고 ID/question/RCODE·validation을 통과한 때다. 문항당 정의 1점, state/packet 1점, 장애·trade-off 1점.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://bind9.readthedocs.io/en/v9.21.23/manpages.html#dig-dns-lookup-utility" style="color:#0369a1;">BIND 9 공식 dig manual · +trace, +ignore, timeout 옵션</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc1035.html" style="color:#0369a1;">RFC 1035 · Header flags, UDP/TCP, retry work limit</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc2308.html" style="color:#0369a1;">RFC 2308 · NXDOMAIN/NODATA와 negative SOA cache</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9520.html" style="color:#0369a1;">RFC 9520 · Resolution failure cache와 aggressive retry 억제</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 14</strong><br>
+            <span>회상: DNS 변경 rollout 계획 — TTL 하향, cutover, negative cache, split view, TCP fallback, connection pool과 rollback window를 하나의 runbook으로 방어합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
