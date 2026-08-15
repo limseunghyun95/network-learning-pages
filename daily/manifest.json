@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-14T09:19:41+09:00",
+  "updatedAt": "2026-08-15T09:10:17+09:00",
   "lessons": [
     {
       "day": 1,
@@ -122,6 +122,15 @@
       "path": "day-13.html",
       "kind": "lab",
       "publishedAt": "2026-08-14T09:19:41+09:00"
+    },
+    {
+      "day": 14,
+      "week": 2,
+      "title": "회상: DNS 변경 rollout 계획",
+      "summary": "TTL 사전 하향부터 authoritative cutover, positive·negative·stale cache, resolver별 관측, connection pool drain과 rollback window까지 하나의 상태 전이와 시간 예산으로 설계하는 Week 2 리뷰입니다.",
+      "path": "day-14.html",
+      "kind": "review",
+      "publishedAt": "2026-08-15T09:10:17+09:00"
     }
   ]
 }
