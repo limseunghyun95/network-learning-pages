@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-15T09:10:17+09:00",
+  "updatedAt": "2026-08-16T09:17:54+09:00",
   "lessons": [
     {
       "day": 1,
@@ -131,6 +131,15 @@
       "path": "day-14.html",
       "kind": "review",
       "publishedAt": "2026-08-15T09:10:17+09:00"
+    },
+    {
+      "day": 15,
+      "week": 3,
+      "title": "3-way handshake, sequence, ACK",
+      "summary": "SYN·SYN-ACK·ACK의 숫자와 client/server TCP state를 따라가며 listener·SYN backlog·accept queue, NAT/LB state, connect·accept·application 성공 경계를 구분하는 TCP 연결 수립 심화 과정입니다.",
+      "path": "day-15.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-16T09:17:54+09:00"
     }
   ]
 }
