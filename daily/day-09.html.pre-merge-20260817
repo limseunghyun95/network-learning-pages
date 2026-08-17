@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 09</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 2 / DAY 09</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">A / AAAA / CNAME / NS와 negative answer</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">주소·별칭·위임·부재를 정확히 읽기 · 예상 학습 40분 + 실습 30분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            <strong>A/AAAA</strong>는 이름을 IPv4/IPv6 주소로, <strong>CNAME</strong>은 alias를 canonical name으로, <strong>NS</strong>는 zone 책임자를 가리킨다. <strong>NXDOMAIN</strong>은 이름 자체가 없고 <strong>NODATA</strong>는 이름은 있지만 요청한 type이 없다는 뜻이다. 이 구분이 cache key와 복구 시간을 바꾼다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:29%;font-weight:700;vertical-align:top;">Owner name</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">RR이 붙어 있는 이름. <code>api.example.com. 300 IN A 192.0.2.10</code>에서 owner는 <code>api.example.com.</code>이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">RDATA</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Resource Record가 운반하는 type별 값. A는 IPv4, AAAA는 IPv6, CNAME·NS는 domain name을 담는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">A / AAAA</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">A(type 1)는 32bit IPv4 address, AAAA(type 28)는 128bit IPv6 address를 담는다. 이름 하나에 여러 주소가 하나의 RRset으로 존재할 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">CNAME</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Canonical Name. Owner가 alias이고 RDATA가 canonical target임을 나타낸다. Resolver는 원래 QTYPE을 target name에서 다시 찾는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">NS</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Name Server. Zone을 authoritative하게 제공할 server 이름을 가리킨다. Parent의 NS는 delegation, child apex의 NS는 zone 자체 선언이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SOA</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Start of Authority. Zone의 primary 이름, serial, refresh·retry와 negative caching에 필요한 minimum 정보를 담는 zone apex record다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">NXDOMAIN</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">RCODE Name Error. 질의한 QNAME 자체가 존재하지 않는다는 authoritative negative 의미다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">NODATA</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">정식 RCODE 이름은 아니며, 보통 <code>NOERROR</code>지만 answer가 비어 있고 “이름은 존재하나 요청한 RRset은 없음”을 뜻하는 응답 형태다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Negative TTL</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">NXDOMAIN/NODATA를 얼마나 cache할지 정하는 시간. Authoritative negative response의 SOA TTL과 SOA MINIMUM 중 작은 값에서 계산한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Zone apex</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Zone 최상단 이름. SOA와 NS가 필수로 존재하므로 표준 CNAME의 “다른 data와 공존 금지” 규칙 때문에 apex에 CNAME을 둘 수 없다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>Record는 단순 문자열이 아니라 resolver state machine의 분기 명령이다. CNAME은 query를 새 이름에서 재시작시키고, NS는 다른 authority로 책임을 넘기며, negative answer는 “다시 묻지 말라”는 cache state를 만든다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>NXDOMAIN과 NODATA의 blast radius가 다르다.</strong> NXDOMAIN은 같은 이름의 다른 type 질의에도 영향을 주지만 NODATA는 QTYPE별 부재다.</li>
+            <li><strong>Dual-stack rollout은 두 RRset의 독립 배포다.</strong> A가 정상이어도 잘못된 AAAA 때문에 IPv6 우선 client만 실패할 수 있다.</li>
+            <li><strong>CNAME은 indirection과 failure window를 추가한다.</strong> Alias와 target 각각 TTL·authority·DNSSEC·장애 상태가 있다.</li>
+            <li><strong>NS 불일치는 일부 resolver만 실패시키기 쉽다.</strong> Parent delegation과 child apex가 다르면 cache와 선택 server에 따라 결과가 갈린다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 응답 분기</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:separate;border-spacing:0 6px;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="background:#082f49;color:#fff;text-align:center;padding:13px;border-radius:8px;"><strong>① Query</strong><br><span style="font-size:14px;color:#d5edf7;">QNAME=shop.example. · QTYPE=A</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ authoritative zone tree에서 owner/QTYPE match</td></tr>
+            <tr><td style="background:#eef2ff;text-align:center;padding:13px;border:1px solid #c7d2fe;border-radius:8px;"><strong>② 직접 주소?</strong><br><span style="font-size:14px;">A → IPv4 RRset · AAAA → IPv6 RRset</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">아니면 ↓</td></tr>
+            <tr><td style="background:#fff7e6;text-align:center;padding:13px;border:1px solid #f0cf88;border-radius:8px;"><strong>③ CNAME alias?</strong><br><span style="font-size:14px;">CNAME을 answer에 넣고 canonical target에서 A query 재시작</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">zone cut이면 ↓</td></tr>
+            <tr><td style="background:#f7fafb;text-align:center;padding:13px;border:1px solid #cbd8de;border-radius:8px;"><strong>④ NS delegation</strong><br><span style="font-size:14px;">Authority=child NS · 필요하면 Additional=glue address</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">owner/type가 없으면 ↓</td></tr>
+            <tr><td style="background:#fdecec;text-align:center;padding:13px;border:1px solid #efb0b0;border-radius:8px;"><strong>⑤ Negative answer</strong><br><span style="font-size:14px;">이름 없음: NXDOMAIN · type 없음: NOERROR/NODATA · Authority=SOA</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↺ RRset/negative TTL을 cache하고 client에 반환</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li>A와 AAAA는 별도 QTYPE·RRset이다. Client가 둘을 모두 요청해도 response 순서와 실제 연결 시도 순서는 resolver/application 구현에 따라 달라질 수 있다.</li>
+            <li>CNAME owner를 만나면 그 RR을 보존하고 원래 QTYPE을 target에서 다시 찾는다. Target A/AAAA가 같은 response에 포함될 수도, 별도 authority query가 필요할 수도 있다.</li>
+            <li>NS delegation은 최종 service address가 아니라 “다음 질문의 책임자”를 준다. NS target 자체 주소가 delegation 아래에 있으면 순환을 깨기 위한 glue가 필요할 수 있다.</li>
+            <li>NXDOMAIN은 QNAME 부재를 RCODE로 표현한다. NODATA는 이름 존재와 type 부재를 <code>NOERROR + empty answer + SOA</code> 같은 구조에서 추론한다.</li>
+            <li>Recursive resolver는 positive RRset뿐 아니라 negative answer도 TTL 동안 저장한다. 잘못된 negative 배포를 고쳐도 기존 cache가 만료되기 전까지 일부 client는 계속 실패한다.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Cache key와 불변식</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:28%;">상태</th><th style="padding:9px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">소유권·key·안전한 해석</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Positive A/AAAA</td><td style="padding:9px;border:1px solid #dbe3e8;">보통 <code>&lt;name,type,class&gt;</code> RRset과 expiry로 저장한다. A cache hit가 AAAA 존재 여부를 말하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">CNAME chain</td><td style="padding:9px;border:1px solid #dbe3e8;">Alias→target 각 RRset이 독립 TTL을 갖는다. Chain의 어느 link가 만료·실패했는지 분리해야 하며 loop와 과도한 depth는 resolver가 중단해야 한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">NXDOMAIN cache</td><td style="padding:9px;border:1px solid #dbe3e8;">RFC 2308은 같은 <code>&lt;QNAME,QCLASS&gt;</code>에 재사용하도록 설명한다. 이름 전체 부재이므로 다른 QTYPE에도 영향을 미친다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">NODATA cache</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>&lt;QNAME,QTYPE,QCLASS&gt;</code>에 저장한다. AAAA NODATA가 A 부재를 뜻하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">NS delegation</td><td style="padding:9px;border:1px solid #dbe3e8;">Parent delegation NS와 child authoritative NS는 서로 다른 zone data다. 일치 여부와 glue freshness를 별도로 관찰한다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">CNAME의 핵심 불변식</h3>
+          <ul style="padding-left:22px;">
+            <li>CNAME owner는 alias이며 일반 data와 공존하지 않아야 한다. 그래야 resolver가 다른 QTYPE을 authority에 다시 확인하지 않고 target으로 안전하게 전환할 수 있다.</li>
+            <li>Zone apex에는 SOA와 NS가 존재해야 하므로 표준 CNAME을 둘 수 없다. 일부 provider의 ALIAS/ANAME flattening은 provider 기능이지 표준 CNAME RR로 동일시하지 않는다.</li>
+            <li>CNAME target은 다른 zone에 있을 수 있다. 이 경우 두 운영자·두 TTL·두 delegation·두 failure domain이 한 application lookup에 결합된다.</li>
+            <li>CNAME answer 뒤 최종 target이 NXDOMAIN이면 alias RR과 negative result가 함께 관찰될 수 있다. “answer section이 비어 있지 않으니 성공”이라고 판단하면 안 된다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Dual-stack은 별도 SLO로 rollout한다.</strong> A/AAAA 응답률, IPv4/IPv6 connect latency와 실패를 분리하고 AAAA를 내기 전에 실제 IPv6 route·firewall·LB·backend를 검증한다.</li>
+            <li><strong>CNAME chain을 짧게 유지한다.</strong> 매 link는 cache miss RTT, 운영 의존성, DNSSEC·위임 실패 창을 추가한다. Alias와 target TTL을 함께 inventory한다.</li>
+            <li><strong>NS 변경은 parent·child·glue를 하나의 transaction처럼 계획한다.</strong> 새 server를 먼저 준비하고 양쪽 NS 일치·응답을 검증한 뒤 old server를 충분한 TTL window 후 제거한다.</li>
+            <li><strong>Negative response를 first-class metric으로 본다.</strong> NXDOMAIN, NODATA, SERVFAIL, timeout을 분리하고 QNAME/QTYPE·resolver·view별로 측정한다.</li>
+            <li><strong>변경 전 TTL을 낮추고 기다린다.</strong> 배포 직전에 낮춘 TTL은 이미 cache된 긴 TTL을 소급해 줄이지 못한다. 최소 기존 TTL window를 먼저 보낸다.</li>
+            <li><strong>권위 서버와 recursive resolver 양쪽을 질의한다.</strong> Authority가 고쳐졌어도 recursive negative cache가 남을 수 있으므로 출처와 client view를 동시에 확인한다.</li>
+          </ul>
+          <div style="background:#fff7e6;border:1px solid #f0cf88;padding:14px 16px;">
+            <strong>Anti-pattern:</strong> IPv6 장애를 피하려고 모든 AAAA를 즉시 삭제하거나, NXDOMAIN을 보고 전체 resolver cache를 flush하지 않는다. 영향 QNAME/QTYPE과 negative TTL을 계산하고 가역적인 scope로 조치한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> CNAME 기반 API 전환 후 일부 client만 NXDOMAIN, 일부 IPv6 client만 timeout한다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;width:22%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">실행 내용</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>증상</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">QNAME/QTYPE별 RCODE·answer chain, resolver·region·address family별 실패율, 최초 시각과 변경 시각을 분리한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>먼저 수집할 증거/지표</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Recursive와 authoritative 양쪽 <code>dig +comments +authority +additional</code>, CNAME/A/AAAA TTL, SOA negative TTL, parent/child NS, IPv4/IPv6 connect timing과 packet capture를 변경 전에 저장한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>가능한 가설</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Target name 오타로 NXDOMAIN cache, AAAA가 unreachable LB를 가리킴, CNAME chain 일부 zone 장애, parent/child NS 불일치, resolver view 차이, TTL 전파 window.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>안전한 첫 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">정상 확인된 이전 target으로 CNAME을 한 canary zone/view부터 되돌리거나, 영향이 증명된 AAAA RRset만 가역적으로 withdraw하고 IPv4 capacity를 확인한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>Rollback/복구</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">이전 CNAME/A/AAAA·NS snapshot을 복원하고 authoritative serial·응답을 검증한다. Positive와 negative TTL 최대 잔여 시간을 계산해 resolver별 회복을 추적한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>하지 말아야 할 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">전체 cache flush, A와 AAAA 동시 무계획 삭제, old authoritative 즉시 종료, CNAME target을 다시 CNAME으로 연쇄 변경, DNS 성공만 보고 IPv6 path 검증 생략을 하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 30분 local authoritative 실습</h2>
+          <p><strong>목표:</strong> 격리된 client namespace에서 임시 dnsmasq를 port 5353에 띄워 A, AAAA NODATA, CNAME chain, NXDOMAIN을 직접 비교한다.</p>
+          <p><strong>사전 조건:</strong> Docker Desktop, 터미널 2개, 이 저장소. Documentation address <code>192.0.2.10</code>만 사용하며 host DNS 설정은 바꾸지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 먼저 결과 예측 (3분)</h3>
+          <ol style="padding-left:22px;">
+            <li><code>api.demo.test A</code>와 <code>api.demo.test AAAA</code>의 RCODE·answer count는 어떻게 다를까?</li>
+            <li><code>alias.demo.test A</code>에는 어떤 owner name 두 개가 보일까?</li>
+            <li><code>missing.demo.test A</code>가 NXDOMAIN이면 같은 이름의 AAAA도 왜 영향을 받을까?</li>
+          </ol>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · 격리 zone 시작 (5분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            make up<br><br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dnsmasq --no-daemon --port=5353 --listen-address=127.0.0.1 --bind-interfaces --no-resolv --log-queries --local=/demo.test/ --host-record=api.demo.test,192.0.2.10 --cname=alias.demo.test,api.demo.test
+          </div>
+          <p>마지막 명령은 터미널 A에서 foreground로 유지한다. 이 process가 <code>demo.test</code> local data의 응답자 역할을 한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · A와 AAAA/NODATA 비교 (7분)</h3>
+          <p><strong>터미널 B:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @127.0.0.1 -p 5353 api.demo.test A +comments +authority<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @127.0.0.1 -p 5353 api.demo.test AAAA +comments +authority
+          </div>
+          <p><strong>예상 관찰:</strong> A는 <code>NOERROR</code>와 <code>192.0.2.10</code> answer, AAAA는 같은 이름이 존재하지만 IPv6 RRset이 없어 <code>NOERROR</code>와 빈 answer인 NODATA 형태다. dnsmasq 버전에 따라 authority section 표현은 다를 수 있으므로 RCODE와 answer count를 우선 비교한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · CNAME chain 확인 (6분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @127.0.0.1 -p 5353 alias.demo.test CNAME +comments<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @127.0.0.1 -p 5353 alias.demo.test A +comments
+          </div>
+          <p><strong>예상 관찰:</strong> CNAME query는 alias→<code>api.demo.test</code>를, A query는 CNAME과 최종 A를 함께 보일 수 있다. Alias와 target owner를 구분해 TTL을 기록한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · 실패 주입: 존재하지 않는 이름 (6분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @127.0.0.1 -p 5353 missing.demo.test A +comments +authority<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client dig @127.0.0.1 -p 5353 missing.demo.test AAAA +comments +authority
+          </div>
+          <p><strong>예상 관찰:</strong> Local zone에 owner가 없어 NXDOMAIN이다. A와 AAAA 모두 이름 부재의 영향을 받는다. NODATA와 달리 cache key가 QTYPE에만 한정되지 않는 이유를 설명해 본다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오류 해결과 cleanup (3분)</h3>
+          <ul style="padding-left:22px;">
+            <li><code>address already in use</code>: client에서 <code>ss -lunp</code>로 5353 owner를 확인하고 임의의 다른 high port를 사용한다.</li>
+            <li>CNAME option 오류: dnsmasq version의 <code>dnsmasq --help</code>에서 <code>--cname</code> 지원을 확인한다. Version 차이를 숨기지 않는다.</li>
+            <li>NXDOMAIN 대신 다른 status가 나오면 <code>--local=/demo.test/</code> 적용 여부와 query server/port를 확인한다.</li>
+          </ul>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            터미널 A에서 Control-C로 임시 dnsmasq 종료<br>
+            make down
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>AAAA는 “A가 네 개”가 아니다.</strong> 이름은 역사적이지만 128bit IPv6 address RR이며 A와 별도 type이다.</li>
+            <li><strong>NS target을 CNAME으로 만들지 않는다.</strong> Delegation을 따라가려면 stable address resolution과 glue가 필요하며 alias는 상호운용 문제를 만든다.</li>
+            <li><strong>Additional section의 glue를 authoritative answer로 오해하지 않는다.</strong> Resolver가 다음 server를 찾기 위한 보조 data이며 bailiwick 검증이 필요하다.</li>
+            <li><strong>NODATA를 NXDOMAIN으로 바꾸지 않는다.</strong> 이름이 존재하는데 AAAA만 없는 것은 정상적인 IPv4-only 설계일 수 있다.</li>
+            <li><strong>Wildcard가 모든 부재를 덮지 않는다.</strong> Existing empty non-terminal과 delegation 경계 때문에 기대와 다른 NXDOMAIN/NODATA가 나올 수 있다.</li>
+            <li><strong>Negative cache도 state다.</strong> Record를 새로 만들어도 resolver가 SOA 기반 negative TTL을 소진하기 전까지 이전 부재를 답할 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“NXDOMAIN과 NODATA를 packet과 cache 관점에서 비교하세요.”</strong><br>좋은 답변 구조: RCODE/answer/SOA → 이름 부재 vs type 부재 → cache key → 다른 QTYPE 영향 → negative TTL → 장애 복구·관측 방법.</li>
+            <li><strong>“CNAME으로 무중단 endpoint 전환을 설계하세요.”</strong><br>좋은 답변 구조: current chain·TTL inventory → target 선검증 → TTL 사전 하향 window → canary → A/AAAA path → rollback target → negative/positive cache 잔여 → apex 대안.</li>
+            <li><strong>“Parent와 child NS가 다를 때 왜 간헐 장애가 됩니까?”</strong><br>좋은 답변 구조: delegation과 apex 소유자 → resolver cache/NS 선택 → glue·lame server → 수치화된 TTL window → 양쪽 dig 증거 → 안전한 추가·검증·제거 순서.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Stub, recursive resolver, authoritative server의 상태 소유권을 구분하라.</li>
+            <li>Recursive resolver의 warm cache와 cold cache path는 어떻게 다른가?</li>
+            <li>RD, RA, AA bit가 각각 말해 주지 못하는 것은 무엇인가?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Stub은 위임, recursor는 resolution/cache, authority는 zone 원본. ② Warm은 cache 응답, cold는 delegation을 따라 upstream query. ③ 실제 cache miss 경로, data 정확성, service 도달성은 보장하지 않는다. 상태·불변식·미보장을 모두 말하면 만점.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>A와 AAAA가 독립 RRset이라는 사실이 장애 대응에 주는 의미는?</li>
+            <li>CNAME owner가 일반 A/NS data와 공존하면 안 되는 이유는?</li>
+            <li>NXDOMAIN과 NODATA의 cache key와 다른 QTYPE 영향은 어떻게 다른가?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① IPv4/IPv6 응답·path·SLO를 따로 본다. ② Alias를 만난 resolver가 target으로 일관되게 재시작하기 위한 불변식이다. ③ NXDOMAIN은 name/class 부재라 type 전반, NODATA는 name/type/class 부재라 해당 type에 적용된다. 정의 1점, 내부 흐름 1점, 실무 영향 1점으로 문항당 3점.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc1034.html" style="color:#0369a1;">RFC 1034 · CNAME resolution, delegation, zone concepts</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc1035.html" style="color:#0369a1;">RFC 1035 · A/CNAME/NS type와 DNS wire format</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc2181.html" style="color:#0369a1;">RFC 2181 · CNAME과 다른 data의 공존 규칙</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc2308.html" style="color:#0369a1;">RFC 2308 · NXDOMAIN, NODATA, negative caching</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 10</strong><br>
+            <span>Cache, TTL, negative caching — TTL을 단순 초 단위 숫자가 아니라 consistency window, upstream load, rollback 가능성을 조절하는 분산 상태 정책으로 다룹니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

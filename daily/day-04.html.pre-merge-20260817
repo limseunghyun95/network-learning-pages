@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 04</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 1 / DAY 04</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">MAC, ARP/ND, switch</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">Next-hop IP가 실제 Ethernet frame으로 나가기까지 · 예상 학습 35분 + 실습 30분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Route lookup이 next-hop IP를 정하면 host의 neighbor cache가 그 IP를 link-layer address로 해석하고, switch는 frame의 source MAC을 학습해 destination port로 전달한다. 두 table은 목적·소유자·수명이 다르며, 하나만 틀려도 packet은 application에 도달하지 못한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;width:29%;font-weight:700;vertical-align:top;">MAC address</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Media Access Control address. Ethernet에서 한 link 안의 interface를 식별하는 보통 48bit 주소다. IP처럼 end-to-end route를 표현하지 않는다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">ARP</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Address Resolution Protocol. IPv4 next-hop address를 Ethernet MAC 같은 link-layer address로 해석한다. Remote server IP가 아니라 현재 link의 next hop을 묻는다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">IPv6 ND / NDP</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Neighbor Discovery Protocol. ICMPv6를 이용해 address resolution뿐 아니라 router·prefix discovery, redirect, reachability 확인을 수행한다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">NS / NA</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Neighbor Solicitation과 Neighbor Advertisement. IPv6에서 이웃의 link-layer address를 묻고 알리며, multicast를 활용해 IPv4 broadcast ARP보다 수신 범위를 줄인다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Neighbor cache</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Host kernel이 interface별로 관리하는 next-hop IP→link-layer address와 reachability 상태. Linux에서는 <code>ip neigh</code>로 관찰한다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Switch FDB</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Forwarding Database. Switch가 VLAN별 source MAC→ingress port를 학습해 frame을 어느 port로 보낼지 결정하는 table이다. CAM table이라고도 부르지만 구현 메모리와 논리 table은 구분한다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Broadcast / multicast</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Broadcast는 같은 broadcast domain 전체, multicast는 가입한 group을 대상으로 한다. IPv4 ARP request는 Ethernet broadcast이고 IPv6 NS는 solicited-node multicast를 쓴다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">NUD / DAD</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Neighbor Unreachability Detection은 이웃의 forward path가 살아 있는지 확인한다. Duplicate Address Detection은 새 IPv6 address가 link에서 중복인지 사용 전에 검사한다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>DNS·route·TCP server가 모두 정상이어도 neighbor resolution이 실패하면 IP packet은 NIC queue까지 가지 못한다. 반대로 ARP reply가 보여도 올바른 device가 답했다는 인증은 없으므로 traffic hijack이나 duplicate IP일 수 있다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Local destination:</strong> host는 destination IP 자체의 MAC을 찾는다.</li>
+            <li><strong>Remote destination:</strong> host는 remote server의 MAC을 찾지 않고 default gateway의 MAC을 찾는다. MAC address는 router hop마다 바뀐다.</li>
+            <li><strong>Failover:</strong> VIP가 새 node로 이동해도 peer neighbor cache와 switch FDB가 이전 위치를 가리키면 수 초~수 분의 black hole이 생길 수 있다.</li>
+            <li><strong>Virtual network:</strong> Container, VM, Kubernetes CNI, EVPN/VXLAN에서는 proxy ARP/ND나 control-plane learning이 broadcast를 대체할 수 있어 capture 위치가 중요하다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <p><strong>상황:</strong> Client <code>172.28.0.50/24</code>가 API <code>172.28.0.20</code>에 첫 packet을 보낸다. Neighbor cache와 switch FDB에는 아직 관련 entry가 없다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:separate;border-spacing:0 6px;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="background:#082f49;color:#fff;text-align:center;padding:13px;border-radius:8px;"><strong>① Route lookup</strong><br><span style="font-size:14px;color:#d5edf7;">next hop = 172.28.0.20 · egress = eth0</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ neighbor cache miss · IP packet 대기</td></tr>
+            <tr><td style="background:#fff7e6;text-align:center;padding:13px;border:1px solid #f0cf88;border-radius:8px;"><strong>② ARP Request broadcast</strong><br><span style="font-size:14px;">ff:ff:ff:ff:ff:ff · “172.28.0.20을 가진 MAC은?”</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ switch가 source MAC 학습 · VLAN 안으로 flood</td></tr>
+            <tr><td style="background:#eef2ff;text-align:center;padding:13px;border:1px solid #c7d2fe;border-radius:8px;"><strong>③ API의 ARP Reply unicast</strong><br><span style="font-size:14px;">“172.28.0.20 = 02:42:ac:1c:00:14”</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ neighbor cache 갱신 · queued packet 재개</td></tr>
+            <tr><td style="background:#edf8f2;text-align:center;padding:13px;border:1px solid #a8d8bd;border-radius:8px;"><strong>④ IP packet을 Ethernet frame에 담아 전송</strong><br><span style="font-size:14px;">switch FDB가 destination MAC의 port로 forward</span></td></tr>
+            <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ TCP ACK·data가 오면 reachability 신호로 활용 가능</td></tr>
+            <tr><td style="background:#f7fafb;text-align:center;padding:13px;border:1px solid #cbd8de;border-radius:8px;"><strong>⑤ Application request 시작</strong><br><span style="font-size:14px;">ARP 성공은 TCP·HTTP·business 성공보다 앞선 link 단계</span></td></tr>
+          </table>
+          <h3 style="font-size:18px;color:#075985;">번호별 요청·응답·상태 변화</h3>
+          <ol style="padding-left:22px;">
+            <li>Route table이 on-link destination을 선택한다. Remote address라면 이후 모든 과정의 target IP는 remote server가 아니라 gateway다.</li>
+            <li>Kernel은 neighbor entry를 <code>INCOMPLETE</code>로 만들고 resolution이 끝날 때까지 packet을 제한된 queue에 둔다. 무한히 쌓지 않으므로 대량 cache miss는 loss와 latency spike를 만든다.</li>
+            <li>Switch는 ARP 내용의 IP를 이해해야 forwarding할 필요가 없다. 들어온 Ethernet source MAC과 port를 학습하고 broadcast를 같은 VLAN의 다른 port로 flood한다.</li>
+            <li>Reply를 받은 host는 IP→MAC mapping을 cache하고 대기 packet을 전송한다. Switch는 reply의 source MAC도 학습해 이후 unicast를 선택적으로 전달한다.</li>
+            <li>Neighbor resolution 성공은 link 전달 준비 완료일 뿐이다. TCP handshake, TLS, HTTP와 application commit 성공은 별도 timestamp로 추적해야 한다.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">서로 다른 두 table과 불변식</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">상태</th><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">Key → value · 소유자 · 불변식</th></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;">Neighbor cache</td><td style="padding:10px;border:1px solid #dbe3e8;">Next-hop IP + interface → MAC + reachability. Host kernel 소유. 선택한 interface의 같은 link에서 next hop으로 frame을 보낼 수 있어야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;">Switch FDB</td><td style="padding:10px;border:1px solid #dbe3e8;">VLAN + MAC → egress port. Switch/bridge 소유. 동일 VLAN에서 source MAC이 최근 관측된 port를 가리킨다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;">Routing FIB</td><td style="padding:10px;border:1px solid #dbe3e8;">Destination prefix → next hop + interface. Host/router 소유. LPM 결과가 neighbor lookup의 key와 link를 먼저 정한다.</td></tr>
+          </table>
+          <p><strong>면접 핵심:</strong> ARP table을 switch가 가진다고 말하면 안 된다. L3 host/router의 neighbor cache와 L2 switch의 MAC FDB는 독립 상태다. Linux bridge가 한 kernel 안에서 둘 다 보일 수 있어도 논리 역할은 그대로 다르다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">IPv6 NDP state machine</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;">INCOMPLETE</td><td style="padding:9px;border:1px solid #dbe3e8;">NS를 보냈고 link-layer address를 기다리는 중. Packet이 queue될 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;font-weight:700;">REACHABLE</td><td style="padding:9px;border:1px solid #dbe3e8;">최근 forward-path 도달 가능성이 확인됐다. Timer 후 영구 삭제가 아니라 STALE로 이동할 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;">STALE</td><td style="padding:9px;border:1px solid #dbe3e8;">Mapping은 있으나 최근 reachability 증거가 없다. 사용되기 전까지 probe하지 않아 불필요한 traffic을 줄인다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;font-weight:700;">DELAY → PROBE</td><td style="padding:9px;border:1px solid #dbe3e8;">상위 protocol 확인을 잠시 기다린 뒤 직접 NS probe를 보낸다. 확인 실패 시 FAILED로 간다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;background:#fff0f2;font-weight:700;">FAILED</td><td style="padding:9px;border:1px solid #dbe3e8;">Resolution/reachability 확인이 실패했다. 대기 packet drop과 application timeout으로 이어질 수 있다.</td></tr>
+          </table>
+          <p>Linux는 IPv4 ARP entry도 통합 neighbor subsystem에서 유사한 NUD 이름으로 표시한다. 그러나 IPv4 ARP와 IPv6 NDP의 wire protocol·multicast·router discovery·DAD 의미를 같다고 단정하지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Control path와 data path, failure window</h3>
+          <ul style="padding-left:22px;">
+            <li><strong>Control path:</strong> ARP/NS/NA, FDB learning, EVPN advertisement, gratuitous ARP/unsolicited NA가 mapping을 만들고 갱신한다.</li>
+            <li><strong>Data path:</strong> 매 frame은 cache/FDB 결과로 queue와 egress port를 선택한다. Unknown unicast는 구현·정책에 따라 flood 또는 drop될 수 있다.</li>
+            <li><strong>Failure window:</strong> VIP 이동 직후 old neighbor cache, old FDB, new owner announcement가 서로 다른 timer로 수렴한다. 양 끝 capture와 switch telemetry timestamp를 맞춰야 한다.</li>
+            <li><strong>DAD:</strong> IPv6 address는 DAD 완료 전 tentative다. Interface에 보인다는 사실만으로 일반 source address로 사용 가능하다고 보지 않는다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 Best Practice</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>먼저 next hop을 확정한다.</strong> <code>ip route get DEST</code>로 interface와 gateway를 확인한 뒤 그 next hop을 <code>ip neigh</code>에서 찾는다. Remote server IP를 ARP table에서 찾느라 시간을 낭비하지 않는다.</li>
+            <li><strong>Cache flush는 좁게 한다.</strong> 증거를 먼저 저장하고 문제 IP·interface entry 하나만 제거한다. 전체 neighbor/FDB flush는 재학습 storm과 광범위 latency spike를 만든다.</li>
+            <li><strong>Failover announcement를 검증한다.</strong> VIP owner 변경 시 gratuitous ARP/unsolicited NA의 횟수·간격, switch FDB 이동, peer cache 갱신을 canary와 packet capture로 확인한다.</li>
+            <li><strong>L2 trust를 별도로 통제한다.</strong> Managed network에서는 DHCP snooping과 Dynamic ARP Inspection, IPv6 RA Guard/ND inspection, port security·802.1X 등을 장비 지원 범위에서 적용한다.</li>
+            <li><strong>IPv6를 끄는 것으로 NDP 문제를 숨기지 않는다.</strong> Dual-stack에서는 RA, NS/NA, firewall ICMPv6 허용과 NUD metric을 독립적으로 운영한다. ICMPv6 전체 차단은 정상 동작도 깨뜨린다.</li>
+            <li><strong>Scale budget을 둔다.</strong> Neighbor table·FDB capacity, aging timer, churn rate와 burst queue를 관측한다. 수십만 Pod/VM에서는 control-plane proxy/EVPN 설계가 broadcast 비용을 줄일 수 있다.</li>
+          </ul>
+          <p><strong>Anti-pattern:</strong> 문제를 고치겠다며 production에서 <code>ip neigh flush all</code> 또는 switch MAC table 전체 clear를 먼저 실행하는 것. 원인 증거를 지우고 정상 flow까지 동시에 재학습시킨다.</p>
+          <p><strong>Engine 차이:</strong> Bare metal switch, Linux bridge, cloud virtual switch, Kubernetes CNI는 FDB 공개 범위와 proxy ARP/ND 동작이 다르다. 명령 출력이 없다고 mapping 상태가 없다고 단정하지 말고 해당 platform 공식 telemetry를 확인한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> VIP failover 뒤 일부 client만 timeout되고 잠시 후 자연 복구된다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;width:34%;font-weight:700;vertical-align:top;">증상</td><td style="padding:11px;border:1px solid #dbe3e8;">Failover 직후 특정 subnet/client만 timeout, 같은 VIP가 서로 다른 MAC으로 관측, timer가 지나면 복구, 기존 connection과 신규 connection 영향이 다름.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">먼저 수집할 증거/지표</td><td style="padding:11px;border:1px solid #dbe3e8;">양쪽 <code>ip neigh</code>, <code>ip route get VIP</code>, ARP/NS/NA packet capture와 timestamp, switch FDB MAC move, VIP owner log, announcement count, drop·queue·NUD state.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">가능한 가설</td><td style="padding:11px;border:1px solid #dbe3e8;">Stale neighbor cache, gratuitous ARP/NA 누락·필터링, FDB가 old port 유지, duplicate VIP, L2 loop/MAC flap, wrong VLAN, proxy ARP/ND가 old owner 대신 응답.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#edf8f2;font-weight:700;vertical-align:top;">안전한 첫 조치</td><td style="padding:11px;border:1px solid #dbe3e8;">영향 client 한 대에서 증거를 보존하고 VIP entry 하나만 재검증·삭제해 canary 복구 여부를 본다. 새 owner가 제한된 announcement를 다시 보내도록 검증된 runbook을 적용한다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Rollback/복구</td><td style="padding:11px;border:1px solid #dbe3e8;">VIP를 이전 healthy owner로 되돌리고 announcement/FDB 수렴을 확인한다. 중복 owner를 격리하고 failover 설정·timer 변경을 rollback한 뒤 canary packet path를 재시험한다.</td></tr>
+            <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#fff0f2;font-weight:700;vertical-align:top;">하지 말아야 할 조치</td><td style="padding:11px;border:1px solid #dbe3e8;">전체 cache/FDB를 무작정 flush하지 않는다. ARP reply 하나만 보고 owner가 정당하다고 믿지 않는다. Timeout을 늘려 stale mapping을 숨기지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 30분 재현 실습</h2>
+          <p><strong>목표:</strong> Cache miss→ARP→entry 생성과 잘못된 permanent mapping→frame black hole을 재현한다.</p>
+          <h3 style="font-size:18px;color:#075985;">사전 조건과 실행 전 예측</h3>
+          <ul style="padding-left:22px;">
+            <li>Docker가 실행 중이고 저장소 root에 있다. Compose client에는 실습용 <code>NET_ADMIN</code>·<code>NET_RAW</code> capability가 있다.</li>
+            <li>예측 1: Cache를 지운 뒤 첫 ping과 두 번째 ping 중 어느 쪽에서 ARP request가 보이는가?</li>
+            <li>예측 2: 올바른 IP에 가짜 permanent MAC을 넣으면 ARP가 다시 나갈까, TCP connect가 성공할까?</li>
+          </ul>
+          <h3 style="font-size:18px;color:#075985;">최소 명령과 예상 관찰</h3>
+          <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;">cd labs/basic-network-observability
+make up
+
+# 터미널 A: Ethernet header와 ARP를 관찰
+docker compose exec client \
+  tcpdump -ni eth0 -e -vv 'arp or host 172.28.0.20'
+
+# 터미널 B: entry 삭제 후 첫 packet
+docker compose exec client \
+  ip neigh del 172.28.0.20 dev eth0 2&gt;/dev/null || true
+docker compose exec client ping -c 1 172.28.0.20
+docker compose exec client ip neigh show 172.28.0.20</pre>
+          <p><strong>예상:</strong> Broadcast ARP request, API의 unicast reply, 이어지는 ICMP frame이 보인다. Neighbor entry는 MAC과 REACHABLE/STALE 계열 상태를 가진다. 두 번째 traffic은 유효 cache 동안 ARP 없이 갈 수 있다.</p>
+          <h3 style="font-size:18px;color:#075985;">실패 주입과 rollback</h3>
+          <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;"># 가짜 MAC을 permanent로 고정
+docker compose exec client ip neigh replace \
+  172.28.0.20 lladdr 02:42:ac:1c:00:fe \
+  nud permanent dev eth0
+docker compose exec client ip neigh show 172.28.0.20
+docker compose exec client sh -c \
+  'curl --connect-timeout 2 http://172.28.0.20:8000/health'
+
+# 단일 entry rollback 후 자동 재학습
+docker compose exec client \
+  ip neigh del 172.28.0.20 dev eth0
+docker compose exec client \
+  curl -sS http://172.28.0.20:8000/health</pre>
+          <p><strong>예상:</strong> Permanent entry 때문에 kernel은 ARP를 생략하고 잘못된 destination MAC으로 frame을 보내므로 connect가 실패한다. Entry를 하나만 삭제하면 ARP를 다시 수행하고 복구된다.</p>
+          <h3 style="font-size:18px;color:#075985;">자주 나는 오류와 해결</h3>
+          <ul style="padding-left:22px;">
+            <li><strong>Operation not permitted:</strong> Host가 아니라 Compose <code>client</code>에서 실행했는지 확인한다.</li>
+            <li><strong>tcpdump에 너무 많이 보임:</strong> <code>arp or host 172.28.0.20</code> filter와 <code>-c 20</code>을 추가한다.</li>
+            <li><strong>잘못된 MAC인데 간헐적으로 보임:</strong> Unknown-unicast flood는 switch 구현에 따라 보일 수 있어도 target NIC는 자기 MAC이 아닌 frame을 일반적으로 수용하지 않는다. Ethernet destination과 응답 여부를 함께 본다.</li>
+            <li><strong>IPv6 NS가 안 보임:</strong> 이 Compose network는 IPv4 lab이다. IPv6 NDP는 별도 IPv6-enabled link가 필요하다.</li>
+          </ul>
+          <h3 style="font-size:18px;color:#075985;">Cleanup</h3>
+          <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;">docker compose exec client ip neigh del \
+  172.28.0.20 dev eth0 2&gt;/dev/null || true
+make down</pre>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>Remote server IP를 ARP로 찾는다.</strong> Off-link destination은 gateway IP의 MAC을 찾는다.</li>
+            <li><strong>ARP cache와 switch MAC table을 같은 것으로 본다.</strong> Key, owner, 목적과 aging이 다르다.</li>
+            <li><strong>STALE을 즉시 장애로 본다.</strong> STALE은 mapping이 unusable하다는 뜻이 아니라 다음 사용 때 reachability 검증이 필요하다는 뜻이다.</li>
+            <li><strong>Gratuitous ARP를 강한 소유권 인증으로 본다.</strong> 정상 failover·conflict detection에도 쓰이지만 기본 ARP/NDP 자체에는 강한 sender 인증이 없다.</li>
+            <li><strong>ICMPv6를 전부 차단한다.</strong> NDP, router discovery, PMTU 등 IPv6 핵심 동작을 깨뜨린다.</li>
+            <li><strong>MAC은 절대 바뀌지 않는 hardware serial이라고 믿는다.</strong> Virtual NIC, locally administered address, failover, bonding과 privacy 기능에서 바뀌거나 공유될 수 있다.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 수준 질문</h2>
+          <h3 style="font-size:18px;color:#075985;">Q1. Client가 remote 8.8.8.8에 보낼 때 누구의 MAC을 ARP합니까?</h3>
+          <p><strong>좋은 답변 구조:</strong> Route LPM → egress와 gateway 결정 → gateway가 next hop → gateway IP에 ARP → frame destination은 gateway MAC, IP destination은 8.8.8.8 → router마다 frame 재작성 → NAT 예외와 <code>ip route get</code>/<code>ip neigh</code> 검증을 설명한다.</p>
+          <h3 style="font-size:18px;color:#075985;">Q2. Switch가 ARP table을 갖고 packet을 전달한다는 설명은 왜 부정확합니까?</h3>
+          <p><strong>좋은 답변 구조:</strong> Host neighbor cache IP→MAC과 switch FDB VLAN+MAC→port 분리 → source learning과 unknown flood → L3 switch 예외 → aging·capacity·증거 명령 → 각 table 장애 증상을 비교한다.</p>
+          <h3 style="font-size:18px;color:#075985;">Q3. VIP failover 후 20초 black hole을 어떻게 설계·진단합니까?</h3>
+          <p><strong>좋은 답변 구조:</strong> 허용 downtime 수치 → old/new owner와 announcement timeline → peer neighbor·switch FDB·connection state의 독립 수렴 → GARP/NA와 MAC move telemetry → duplicate owner·spoofing trade-off → canary·rollback·정기 failover test까지 방어한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 어제 내용 회상 3문제</h2>
+          <ol style="padding-left:22px;">
+            <li><code>192.168.10.77/27</code>의 network와 일반 LAN broadcast는?</li>
+            <li>Connected <code>/24</code>와 default <code>/0</code>가 모두 일치할 때 무엇이 이기며 왜 그런가?</li>
+            <li>Private IP가 곧 NAT나 보안 정책을 뜻하지 않는 이유는?</li>
+          </ol>
+          <h3 style="font-size:18px;color:#075985;">짧은 정답/채점 기준</h3>
+          <ol style="padding-left:22px;">
+            <li><code>192.168.10.64</code>와 <code>192.168.10.95</code>라고 답하면 통과.</li>
+            <li>Longest Prefix Match에서 더 구체적인 /24가 이긴다고 답하면 통과.</li>
+            <li>RFC 1918은 전역 유일하지 않은 주소 범위이고 NAT·firewall·identity는 독립 기능이라고 답하면 통과.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 오늘 내용 확인 3문제</h2>
+          <ol style="padding-left:22px;">
+            <li>Remote destination으로 보낼 때 neighbor cache에서 찾는 IP는 누구인가?</li>
+            <li>Host neighbor cache와 switch FDB의 key→value를 각각 말해보라.</li>
+            <li>IPv6 STALE entry가 즉시 삭제·실패를 뜻하지 않는 이유는?</li>
+          </ol>
+          <h3 style="font-size:18px;color:#075985;">짧은 정답/채점 기준</h3>
+          <ol style="padding-left:22px;">
+            <li>Route가 선택한 gateway/next-hop IP라고 답하면 통과.</li>
+            <li>IP+interface→MAC/reachability, VLAN+MAC→switch port라고 답하면 통과.</li>
+            <li>Mapping을 사용하되 traffic 발생 시 DELAY/PROBE로 reachability를 검증하는 lazy state라고 답하면 통과.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">12. 공식 자료</h2>
+          <ul style="padding-left:22px;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc826.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 826 — IPv4 protocol address를 Ethernet address로 해석하는 ARP format과 처리</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc4861.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 4861 — IPv6 Neighbor Discovery, neighbor cache와 NUD state machine</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc5227.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 5227 — IPv4 Address Conflict Detection, ARP Probe와 Announcement</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc4862.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 4862 — IPv6 SLAAC address lifetime과 Duplicate Address Detection</a></li>
+          </ul>
+
+          <div style="margin-top:28px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 05</strong><br>
+            Route, gateway, TTL/hop limit을 FIB lookup과 router hop 관점으로 추적하고, default route·ECMP·policy routing·loop·traceroute와 TTL expiry를 실무 장애 대응까지 연결합니다.
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

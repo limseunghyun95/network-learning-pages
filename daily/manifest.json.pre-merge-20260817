@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-17T09:00:47+09:00",
+  "updatedAt": "2026-08-11T09:14:10+09:00",
   "lessons": [
     {
       "day": 1,
@@ -104,51 +104,6 @@
       "path": "day-11.html",
       "kind": "lesson",
       "publishedAt": "2026-08-11T09:14:10+09:00"
-    },
-    {
-      "day": 12,
-      "week": 2,
-      "title": "split-horizon, search domain, service discovery",
-      "summary": "Short name이 search list로 QNAME 후보가 되고 DNS view가 answer를 선택한 뒤, SRV·A/AAAA·TXT와 readiness·connection state가 실제 서비스 연결로 이어지는 흐름을 학습합니다.",
-      "path": "day-12.html",
-      "kind": "lesson",
-      "publishedAt": "2026-08-12T09:00:22+09:00"
-    },
-    {
-      "day": 13,
-      "week": 2,
-      "title": "랩: dig trace와 DNS 장애",
-      "summary": "dig의 delegation trace와 header·section·timing을 읽고 NXDOMAIN·NODATA·timeout·SERVFAIL·TC/TCP·stale·wrong-view 장애를 증거 기반으로 분리하는 통합 랩입니다.",
-      "path": "day-13.html",
-      "kind": "lab",
-      "publishedAt": "2026-08-14T09:19:41+09:00"
-    },
-    {
-      "day": 14,
-      "week": 2,
-      "title": "회상: DNS 변경 rollout 계획",
-      "summary": "TTL 사전 하향부터 authoritative cutover, positive·negative·stale cache, resolver별 관측, connection pool drain과 rollback window까지 하나의 상태 전이와 시간 예산으로 설계하는 Week 2 리뷰입니다.",
-      "path": "day-14.html",
-      "kind": "review",
-      "publishedAt": "2026-08-15T09:10:17+09:00"
-    },
-    {
-      "day": 15,
-      "week": 3,
-      "title": "3-way handshake, sequence, ACK",
-      "summary": "SYN·SYN-ACK·ACK의 숫자와 client/server TCP state를 따라가며 listener·SYN backlog·accept queue, NAT/LB state, connect·accept·application 성공 경계를 구분하는 TCP 연결 수립 심화 과정입니다.",
-      "path": "day-15.html",
-      "kind": "lesson",
-      "publishedAt": "2026-08-16T09:17:54+09:00"
-    },
-    {
-      "day": 16,
-      "week": 3,
-      "title": "retransmission, RTT/RTO, duplicate ACK",
-      "summary": "RTT 표본에서 SRTT·RTTVAR·RTO를 만들고 timeout·duplicate ACK·SACK·RACK으로 loss를 추론하며, 재전송과 congestion control·application retry의 상호작용을 증거 기반으로 진단하는 과정입니다.",
-      "path": "day-16.html",
-      "kind": "lesson",
-      "publishedAt": "2026-08-17T09:00:47+09:00"
     }
   ]
 }

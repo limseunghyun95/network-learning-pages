@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 03</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr>
+      <td align="center" style="padding:20px 10px;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+          <tr>
+            <td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+              <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 1 / DAY 03</div>
+              <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">IPv4/IPv6, subnet, CIDR</h1>
+              <p style="margin:0;color:#d5edf7;font-size:16px;">주소를 외우지 않고 binary prefix와 route lookup으로 읽기 · 예상 학습 35분 + 실습 25분</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:26px;">
+              <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+                <strong style="color:#075985;">한 줄 요약</strong><br>
+                IP address는 “장비 이름표”가 아니라 interface와 routing 영역에서 쓰는 위치 식별자다. CIDR prefix는 주소 집합을 정의하고, kernel은 destination과 가장 길게 일치하는 prefix를 골라 on-link 또는 gateway라는 다음 행동을 결정한다.
+              </div>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;width:29%;font-weight:700;vertical-align:top;">IP address</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">IP 계층에서 source와 destination을 식별하는 bit string. 보통 host 전체가 아니라 interface 또는 논리 endpoint에 할당되며 한 host가 여러 주소를 가질 수 있다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">IPv4 / IPv6</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">IPv4 주소는 32bit를 10진수 네 묶음으로, IPv6 주소는 128bit를 16bit hexadecimal 묶음으로 주로 표현한다. 주소 크기뿐 아니라 header, address scope, neighbor discovery 동작도 다르다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Subnet</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">같은 network prefix로 묶은 논리적 주소 범위. “같은 switch”와 완전히 같은 말은 아니며, 한 link에 여러 prefix가 있을 수도 있다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">CIDR</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Classless Inter-Domain Routing. 주소를 고정 class가 아니라 <code>address/prefix-length</code>로 표현하고, 연속된 prefix를 할당·집계·route하는 방식이다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Prefix length</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">왼쪽부터 network로 비교할 bit 수. IPv4 <code>/24</code>는 앞 24bit, IPv6 <code>/64</code>는 앞 64bit가 prefix라는 뜻이다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Netmask</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">Prefix bit는 1, 나머지는 0으로 표시한 mask. IPv4 <code>/27</code>은 <code>255.255.255.224</code>다. CIDR 표기가 계산과 집계를 더 직접 보여준다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">On-link / gateway</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">On-link는 목적지가 현재 link에 있어 직접 next-hop으로 삼는다는 뜻이고, gateway는 다른 network로 보내기 위해 먼저 전달할 router다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">FIB / LPM</td><td style="padding:11px;border:1px solid #dbe3e8;vertical-align:top;">FIB(Forwarding Information Base)는 실제 packet 전달에 쓰는 lookup table이다. LPM(Longest Prefix Match)은 일치하는 route 중 prefix가 가장 긴, 즉 가장 구체적인 route를 고르는 규칙이다.</td></tr>
+              </table>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+              <p>DNS가 올바른 IP를 돌려줘도 주소와 prefix 해석이 틀리면 packet은 잘못된 interface, gateway 또는 VPN으로 간다. 특히 cloud VPC, Kubernetes Pod CIDR, 사내망과 VPN에서 주소 범위가 겹치면 service가 살아 있어도 일부 client에서만 timeout이 난다.</p>
+              <ul style="padding-left:22px;">
+                <li><strong>주소는 도달 가능성을 보장하지 않는다.</strong> Address assignment, route, neighbor, firewall, listener는 서로 다른 상태다.</li>
+                <li><strong>“같은 subnet” 판단은 양쪽이 대칭이라고 보장하지 않는다.</strong> Prefix가 잘못 다르면 A는 B를 직접 찾고 B는 A를 gateway로 보내는 비대칭이 생긴다.</li>
+                <li><strong>Private address는 보안 기능이 아니다.</strong> RFC 1918 범위는 전역에서 유일하지 않을 뿐이며, 접근 통제는 firewall·identity·policy가 담당한다.</li>
+                <li><strong>대규모 설계는 주소 개수보다 route 수와 집계가 중요하다.</strong> Prefix를 계층적으로 나누면 장애 영역과 route table 크기를 줄일 수 있다.</li>
+              </ul>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+              <p><strong>상황:</strong> Client <code>172.28.0.50/24</code>가 local API <code>172.28.0.20</code>와 remote service <code>203.0.113.20</code>에 packet을 보낸다.</p>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:separate;border-spacing:0 7px;table-layout:fixed;overflow-wrap:anywhere;">
+                <tr><td style="background:#082f49;color:#fff;text-align:center;padding:13px;border-radius:8px;"><strong>① Application / socket</strong><br><span style="font-size:14px;color:#d5edf7;">destination IP와 port, socket mark·namespace·policy</span></td></tr>
+                <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ kernel route lookup</td></tr>
+                <tr><td style="background:#eef2ff;text-align:center;padding:13px;border:1px solid #c7d2fe;border-radius:8px;"><strong>② FIB · Longest Prefix Match</strong><br><span style="font-size:14px;">172.28.0.0/24 dev eth0 · default via 172.28.0.1</span></td></tr>
+                <tr><td style="text-align:center;color:#0284c7;font-size:18px;">↙ 더 구체적인 /24 일치 &nbsp;&nbsp;&nbsp; / &nbsp;&nbsp;&nbsp; 일치 없음 → /0</td></tr>
+                <tr><td>
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+                    <tr>
+                      <td style="width:50%;background:#edf8f2;text-align:center;padding:12px;border:1px solid #a8d8bd;vertical-align:top;"><strong>③A On-link</strong><br><code>172.28.0.20</code><br><span style="font-size:14px;">next hop = destination 자체</span></td>
+                      <td style="width:50%;background:#fff7e6;text-align:center;padding:12px;border:1px solid #f0cf88;vertical-align:top;"><strong>③B Gateway</strong><br><code>203.0.113.20</code><br><span style="font-size:14px;">next hop = 172.28.0.1</span></td>
+                    </tr>
+                  </table>
+                </td></tr>
+                <tr><td style="text-align:center;color:#0284c7;font-size:22px;">↓ neighbor resolution · Day 04</td></tr>
+                <tr><td style="background:#f7fafb;text-align:center;padding:13px;border:1px solid #cbd8de;border-radius:8px;"><strong>④ Frame 생성 → queue → NIC</strong><br><span style="font-size:14px;">Local은 API MAC, remote는 gateway MAC을 destination으로 사용</span></td></tr>
+              </table>
+              <h3 style="font-size:18px;color:#075985;">번호별 상태와 성공 지점</h3>
+              <ol style="padding-left:22px;">
+                <li>Application이 목적지 IP를 socket에 제공한다. TCP connection이라면 4-tuple 상태가 생기지만 아직 packet 전달 성공은 아니다.</li>
+                <li>Kernel은 network namespace, policy rule, routing table을 선택한 뒤 destination과 LPM을 수행한다. <code>172.28.0.0/24</code>는 주소를 interface에 설정할 때 만들어진 connected route일 수 있다.</li>
+                <li>Local 목적지는 destination 자체를 next hop으로, remote 목적지는 gateway를 next hop으로 삼는다. “Subnet 계산 후 route lookup”이라는 별도 두 단계보다 <strong>connected route도 포함한 하나의 route lookup</strong>으로 이해하는 편이 정확하다.</li>
+                <li>선택한 next hop의 link-layer 주소를 찾은 후 frame을 queue에 넣는다. 여기까지 성공해도 peer application 처리 완료는 아니다.</li>
+              </ol>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+              <h3 style="font-size:18px;color:#075985;">CIDR은 bit 집합이다</h3>
+              <p>주소 <code>A</code>, prefix length <code>p</code>, mask <code>M</code>에 대해 network는 <code>A AND M</code>이다. Destination <code>D</code>가 그 prefix에 속하는 조건은 <code>(D AND M) = network</code>다.</p>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+                <tr><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">192.168.10.77/27 계산</th><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">결과</th></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">/27 mask</td><td style="padding:10px;border:1px solid #dbe3e8;"><code>255.255.255.224</code>; 마지막 octet은 <code>11100000</code></td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">Block 크기</td><td style="padding:10px;border:1px solid #dbe3e8;"><code>2^(32-27) = 32</code>개 주소</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">Network / broadcast</td><td style="padding:10px;border:1px solid #dbe3e8;"><code>192.168.10.64</code> / <code>192.168.10.95</code></td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">일반 LAN host 범위</td><td style="padding:10px;border:1px solid #dbe3e8;"><code>.65</code>~<code>.94</code>. 단, /31 point-to-point와 /32 host route에는 이 공식을 기계적으로 적용하지 않는다.</td></tr>
+              </table>
+
+              <h3 style="font-size:18px;color:#075985;">IPv6 주소와 prefix</h3>
+              <ul style="padding-left:22px;">
+                <li>IPv6는 128bit다. <code>2001:db8:1234:5678::10/64</code>에서 앞 64bit가 subnet prefix이고 뒤쪽은 interface identifier 영역이다.</li>
+                <li>연속된 0 묶음은 한 번만 <code>::</code>로 압축할 수 있다. Text 모양이 달라도 같은 128bit일 수 있으므로 문자열 비교 대신 주소 parser를 사용한다.</li>
+                <li>IPv6에는 broadcast address가 없다. Multicast가 그 역할을 나눠 맡으며, link-local 주소는 router가 다른 link로 전달하지 않는다.</li>
+                <li><code>/64</code>는 일반적인 IPv6 LAN 설계에서 매우 중요하지만 “모든 IPv6 prefix는 무조건 /64”라고 단정하지 않는다. Point-to-point, loopback, allocation 단위와 protocol 요구사항을 구분한다.</li>
+              </ul>
+
+              <h3 style="font-size:18px;color:#075985;">Control path와 data path</h3>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+                <tr><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">경로</th><th style="padding:10px;border:1px solid #dbe3e8;background:#082f49;color:#fff;text-align:left;">상태 소유자와 불변식</th></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">Control path</td><td style="padding:10px;border:1px solid #dbe3e8;">DHCP/SLAAC, operator, cloud controller, routing protocol이 address와 route를 만든다. Prefix는 겹칠 수 있지만 의도한 우선순위·scope·소유권이 문서화되어야 한다.</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">Data path</td><td style="padding:10px;border:1px solid #dbe3e8;">각 packet은 FIB에서 LPM을 수행하고 egress interface와 next hop을 얻는다. <code>/32</code>는 <code>/24</code>보다, <code>/24</code>는 <code>/0</code>보다 우선한다.</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">구현</td><td style="padding:10px;border:1px solid #dbe3e8;">Software router는 trie 계열 구조를, hardware는 TCAM 같은 병렬 match 메모리를 사용할 수 있다. 구현은 달라도 externally visible invariant는 longest-prefix match다.</td></tr>
+                <tr><td style="padding:10px;border:1px solid #dbe3e8;">Address state</td><td style="padding:10px;border:1px solid #dbe3e8;">IPv6 address는 Duplicate Address Detection 중 tentative 상태일 수 있다. “표시됨”과 “source로 사용 가능” 시점이 같다고 가정하지 않는다.</td></tr>
+              </table>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 Best Practice</h2>
+              <ul style="padding-left:22px;">
+                <li><strong>IPAM을 source of truth로 둔다.</strong> VPC, VPN, office, Pod/Service CIDR, partner network를 함께 기록하고 생성 전에 overlap을 검사한다.</li>
+                <li><strong>계층적으로 할당한다.</strong> Region → environment → AZ → workload처럼 상위 prefix를 나누면 aggregate route를 광고하고 장애 영역을 읽기 쉽다. 성장 여유와 인수합병/VPN 연결 공간도 남긴다.</li>
+                <li><strong>계산보다 실제 route를 확인한다.</strong> <code>ip route get DEST</code>는 policy rule, host route, metric까지 반영한 kernel의 결정을 보여준다. 종이에 같은 /24라고 계산한 것만으로 결론내리지 않는다.</li>
+                <li><strong>Dual-stack을 두 개의 data path로 관측한다.</strong> A와 AAAA, IPv4/IPv6 route, firewall, MTU, latency가 독립적으로 실패할 수 있다. 전체 성공률만 보면 한 family의 장애가 가려진다.</li>
+                <li><strong>Provider 예약 주소를 문서로 확인한다.</strong> 일반 IPv4 usable-host 공식과 cloud가 subnet에서 예약하는 주소 수는 같지 않을 수 있다. Docker, Kubernetes, 각 cloud engine의 구현 차이를 반영한다.</li>
+                <li><strong>좁은 exception route에는 owner와 만료를 둔다.</strong> 장애 우회를 위한 /32·/128 route는 넓은 정상 route를 이기므로 잊힌 우회가 장기 장애 원인이 된다.</li>
+              </ul>
+              <p><strong>Anti-pattern:</strong> <code>10.0.0.0/8</code>이면 “우리 내부니까 안전하고 겹치지 않는다”고 가정하는 것. 여러 조직이 같은 private range를 재사용할 수 있고 NAT·VPN·peering에서 충돌한다.</p>
+              <p><strong>Trade-off:</strong> 큰 subnet은 운영 여유가 크지만 broadcast domain, blast radius, address 낭비와 정책 경계가 커질 수 있다. 지나치게 작은 subnet은 확장·재주소화 비용과 route 수를 늘린다.</p>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+              <p><strong>상황:</strong> VPN 연결 후 특정 사내 service만 timeout되고, VPN을 끄면 정상이다.</p>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;width:34%;font-weight:700;vertical-align:top;">증상</td><td style="padding:11px;border:1px solid #dbe3e8;">특정 CIDR의 service만 timeout, 다른 인터넷 주소는 정상, 사용자·OS·VPN profile에 따라 재현 여부가 다름.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">먼저 수집할 증거/지표</td><td style="padding:11px;border:1px solid #dbe3e8;">DNS 결과의 실제 IP, VPN 전후 <code>ip addr</code>·<code>ip rule</code>·<code>ip route</code>, <code>ip route get DEST</code>, source IP/interface, 양 끝 packet capture와 timestamp.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">가능한 가설</td><td style="padding:11px;border:1px solid #dbe3e8;">Local LAN과 VPN CIDR overlap, 더 구체적인 route 탈취, 잘못된 netmask, split-tunnel 누락, return route 부재, IPv4만 VPN에 포함되고 AAAA는 다른 경로 사용.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#edf8f2;font-weight:700;vertical-align:top;">안전한 첫 조치</td><td style="padding:11px;border:1px solid #dbe3e8;">영향 사용자 한 명에서 route decision을 보존하고, service 단일 /32 또는 /128에 대한 검증된 임시 route로 가설을 canary 확인한다. 범용 route 변경 전 양방향 return path를 확인한다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Rollback/복구</td><td style="padding:11px;border:1px solid #dbe3e8;">임시 route와 VPN profile 변경을 제거하고 이전 profile로 복구한다. 장기적으로 non-overlap CIDR 재할당 또는 명시적 NAT·route 정책을 설계하고 양방향 시험한다.</td></tr>
+                <tr><td style="padding:11px;border:1px solid #dbe3e8;background:#fff0f2;font-weight:700;vertical-align:top;">하지 말아야 할 조치</td><td style="padding:11px;border:1px solid #dbe3e8;">전체 firewall을 끄거나 default route를 무작정 삭제하지 않는다. Timeout만 늘리지 않는다. 한 방향 ping 성공만으로 TCP return path와 application 성공을 확정하지 않는다.</td></tr>
+              </table>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 25분 재현 실습</h2>
+              <p><strong>목표:</strong> Connected <code>/24</code>, default <code>/0</code>, host <code>/32</code>가 LPM으로 경쟁하는 모습을 직접 확인한다.</p>
+              <h3 style="font-size:18px;color:#075985;">사전 조건과 실행 전 예측</h3>
+              <ul style="padding-left:22px;">
+                <li>Docker가 실행 중이고 이 저장소 root에 있다.</li>
+                <li>예측 1: <code>172.28.0.20</code>과 <code>1.1.1.1</code>의 egress/next hop은 같은가?</li>
+                <li>예측 2: <code>172.28.0.20/32</code> blackhole route를 추가하면 기존 <code>172.28.0.0/24</code>보다 어느 route가 선택되는가?</li>
+              </ul>
+              <h3 style="font-size:18px;color:#075985;">최소 명령과 예상 관찰</h3>
+              <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;">make up
+docker compose exec client ip -4 addr show dev eth0
+docker compose exec client ip route
+docker compose exec client ip route get 172.28.0.20
+docker compose exec client ip route get 1.1.1.1
+docker compose exec client ping -c 1 172.28.0.20</pre>
+              <p><strong>예상:</strong> API는 <code>172.28.0.0/24 dev eth0</code> connected route를 따라 직접 가고, 외부 주소는 default gateway를 사용한다. 출력에는 선택된 source address도 보인다.</p>
+              <h3 style="font-size:18px;color:#075985;">실패 주입: 더 구체적인 route가 이긴다</h3>
+              <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;">docker compose exec client \
+  ip route add blackhole 172.28.0.20/32
+docker compose exec client ip route get 172.28.0.20
+docker compose exec client sh -c \
+  'curl --connect-timeout 2 http://172.28.0.20:8000/health'
+
+# rollback
+docker compose exec client \
+  ip route del blackhole 172.28.0.20/32
+docker compose exec client \
+  curl -sS http://172.28.0.20:8000/health</pre>
+              <p><strong>예상:</strong> <code>/32</code> blackhole이 <code>/24</code>보다 구체적이므로 API만 실패한다. 삭제하면 connected route가 다시 선택되어 복구된다. 이 실험은 service process를 멈추지 않고 routing failure를 분리한다.</p>
+              <h3 style="font-size:18px;color:#075985;">자주 나는 오류와 해결</h3>
+              <ul style="padding-left:22px;">
+                <li><strong>Operation not permitted:</strong> 반드시 Compose의 <code>client</code> container에서 실행한다. 이 service에는 실습용 <code>NET_ADMIN</code> capability가 있다.</li>
+                <li><strong>File exists:</strong> 이전 실행의 /32가 남았다. 먼저 <code>ip route show 172.28.0.20/32</code>로 확인하고 cleanup 명령으로 제거한다.</li>
+                <li><strong>외부 route가 환경마다 다름:</strong> 핵심은 gateway 숫자가 아니라 destination별 선택 route와 source/interface가 다른지 비교하는 것이다.</li>
+              </ul>
+              <h3 style="font-size:18px;color:#075985;">Cleanup</h3>
+              <pre style="margin:10px 0;padding:14px;background:#102a33;color:#eefcff;border-radius:8px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;font-size:14px;line-height:1.55;">docker compose exec client \
+  ip route del blackhole 172.28.0.20/32 2&gt;/dev/null || true
+make down</pre>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+              <ol style="padding-left:22px;">
+                <li><strong>IP 하나가 물리 장비 하나라고 생각한다.</strong> Interface, VIP, loopback, Pod, NAT, anycast 등 주소 소유 방식은 다양하다.</li>
+                <li><strong>Private IP면 NAT가 반드시 있다고 생각한다.</strong> Private addressing과 NAT는 별도 설계다. Private network끼리 routing으로 직접 통신할 수도 있다.</li>
+                <li><strong><code>2^hostbits - 2</code>를 모든 곳에 적용한다.</strong> IPv4 /31 point-to-point, /32 host route, IPv6, cloud 예약 주소는 예외와 모델이 다르다.</li>
+                <li><strong>가장 metric이 낮은 route가 무조건 이긴다고 말한다.</strong> 먼저 longest prefix가 결정되고, 같은 prefix 길이 후보 사이에서 metric 등 추가 규칙이 적용된다.</li>
+                <li><strong>같은 subnet이면 통신된다고 결론낸다.</strong> Neighbor resolution, VLAN, firewall, source policy, return route가 별도로 성공해야 한다.</li>
+                <li><strong>IPv6를 큰 IPv4로만 본다.</strong> No-broadcast, link-local scope, NDP, address state와 dual-stack failure mode가 다르다.</li>
+              </ol>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 수준 질문</h2>
+              <h3 style="font-size:18px;color:#075985;">Q1. A는 10.1.2.130/26, B는 10.1.2.190/27입니다. 서로 같은 subnet입니까?</h3>
+              <p><strong>좋은 답변 구조:</strong> 각 host 관점으로 따로 계산 → A의 /26은 .128~.191이라 B를 on-link로 판단 → B의 /27은 .160~.191이라 A를 off-link로 판단 → 비대칭 next-hop과 ARP/gateway 흐름 → 실제 route table·proxy ARP 가능성 → netmask 일치가 근본 복구임을 설명한다.</p>
+              <h3 style="font-size:18px;color:#075985;">Q2. /16 하나로 3개 region, region당 3개 AZ의 주소 계획을 설계해 보세요.</h3>
+              <p><strong>좋은 답변 구조:</strong> 예상 host/Pod/LB 성장 수치 → region·environment·AZ 계층 분할 → aggregation 가능한 경계 → reserved capacity와 overlap registry → route table·blast radius·비용 → 고갈 시 확장/재주소화 대안까지 방어한다.</p>
+              <h3 style="font-size:18px;color:#075985;">Q3. Route table에 /0, /16, /24, /32가 모두 일치하면 무엇이 선택됩니까?</h3>
+              <p><strong>좋은 답변 구조:</strong> LPM으로 /32 선택 → metric은 동일 prefix 길이 후보 비교에서 고려 → policy routing/VRF/table 선택이 선행할 수 있음 → control plane과 FIB 구분 → <code>ip route get</code>과 packet capture로 검증 → stale exception route rollback을 말한다.</p>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 어제 내용 회상 3문제</h2>
+              <ol style="padding-left:22px;">
+                <li>Application의 <code>write()</code> 한 번과 TCP segment 하나가 1:1이 아닌 이유는?</li>
+                <li>NAT 없는 router hop에서 일반적으로 유지되는 header와 새로 만들어지는 header는?</li>
+                <li>Host capture에서 MTU보다 큰 segment나 bad checksum이 보이면 무엇을 먼저 확인하는가?</li>
+              </ol>
+              <h3 style="font-size:18px;color:#075985;">짧은 정답/채점 기준</h3>
+              <ol style="padding-left:22px;">
+                <li>TCP는 message가 아닌 byte stream이며 MSS·window·offload에 따라 split/merge한다고 답하면 통과.</li>
+                <li>IP/TCP endpoint는 대체로 유지되고 link frame의 MAC/FCS는 hop마다 새로 생기며 TTL/hop limit은 감소한다고 답하면 통과.</li>
+                <li>Capture 위치와 TSO/GSO/checksum offload를 먼저 확인한다고 답하면 통과.</li>
+              </ol>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 오늘 내용 확인 3문제</h2>
+              <ol style="padding-left:22px;">
+                <li><code>192.168.10.77/27</code>의 network와 일반 LAN broadcast는?</li>
+                <li>Connected route와 default route가 모두 있을 때 local subnet destination이 connected route를 고르는 원리는?</li>
+                <li>RFC 1918 private address가 곧 접근 통제나 NAT를 의미하지 않는 이유는?</li>
+              </ol>
+              <h3 style="font-size:18px;color:#075985;">짧은 정답/채점 기준</h3>
+              <ol style="padding-left:22px;">
+                <li><code>192.168.10.64</code>와 <code>192.168.10.95</code>라고 답하면 통과.</li>
+                <li><code>/24</code>가 <code>/0</code>보다 긴 prefix로 destination과 일치해 LPM에서 이긴다고 답하면 통과.</li>
+                <li>Private는 전역 유일·전역 route가 아닌 주소 범위일 뿐이며 firewall, identity, NAT는 독립된 기능이라고 답하면 통과.</li>
+              </ol>
+
+              <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">12. 공식 자료</h2>
+              <ul style="padding-left:22px;">
+                <li><a href="https://www.rfc-editor.org/rfc/rfc4632.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 4632 — CIDR address assignment, route aggregation과 longest-prefix 관점</a></li>
+                <li><a href="https://www.rfc-editor.org/rfc/rfc4291.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 4291 — IPv6 addressing architecture, prefix, unicast·anycast·multicast와 scope</a></li>
+                <li><a href="https://www.rfc-editor.org/rfc/rfc1918.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 1918 — IPv4 private address space와 운영상 제약</a></li>
+                <li><a href="https://www.rfc-editor.org/rfc/rfc3021.html" style="color:#0369a1;overflow-wrap:anywhere;">RFC 3021 — IPv4 point-to-point link에서 /31 prefix를 사용하는 예외</a></li>
+              </ul>
+
+              <div style="margin-top:28px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+                <strong style="color:#7dd3fc;">내일 예고 · Day 04</strong><br>
+                MAC, ARP와 IPv6 Neighbor Discovery가 next-hop IP를 link-layer destination으로 바꾸는 과정을 neighbor cache state, switch forwarding table, spoofing 경계까지 추적합니다.
+              </div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
