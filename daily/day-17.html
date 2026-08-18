@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 17</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 3 / DAY 17</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">receive window와 flow control</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">느린 consumer가 sender까지 멈추는 backpressure 경로 · 예상 학습 55분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            TCP flow control은 receiver가 <strong>ACK의 advertised receive window(rwnd)</strong>로 “ACK number부터 몇 byte를 더 받을 수 있는가”를 알리고 sender가 그 오른쪽 경계를 넘지 않게 하는 hop-to-hop feedback이다. Application이 늦게 읽으면 receive buffer가 차고 rwnd가 줄어 zero window가 될 수 있으며, 이 backpressure는 send buffer·thread·connection pool·upstream queue까지 전파된다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Flow control</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">빠른 sender가 느린 receiver의 memory를 넘치게 하지 않도록 receiver capacity를 feedback하는 제어다. Network 전체 혼잡을 다루는 congestion control과 목적·상태 소유자가 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Receive buffer</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Receiver kernel이 아직 application에 전달하지 못한 byte와 out-of-order byte 등을 보관하는 per-socket memory. 정확한 accounting과 autotuning은 OS·버전에 따라 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Send buffer</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Sender kernel이 아직 전송하지 못했거나 ACK되지 않은 application byte를 보관하는 per-socket memory. <code>write()</code> 성공은 peer 수신 완료가 아니라 이 buffer에 맡겼다는 뜻일 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">rwnd</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Receive window. Receiver가 TCP Window field로 광고한 수신 허용 범위다. ACK=N, rwnd=W이면 N부터 N+W-1까지 받을 의사가 있다는 뜻이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">cwnd</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Congestion window. Sender가 network 혼잡을 피하려고 자체적으로 제한하는 in-flight 양이다. Receiver가 보내는 값이 아니라 sender congestion-control 상태다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">In-flight data</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">보냈지만 아직 cumulative/SACK 증거로 확인되지 않은 network상의 byte. 단순히 send buffer 전체와 같지 않다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Sliding window</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">ACK가 전진하고 새 window가 광고될 때 sender가 보낼 수 있는 sequence 범위의 왼쪽·오른쪽 경계가 이동하는 방식이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Window Scale</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">16-bit Window field의 약 64KiB 한계를 넘기기 위해 SYN에서 방향별 shift count를 협상하는 TCP option. 실제 window는 field를 협상된 만큼 왼쪽 shift해 해석한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Zero window</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Receiver가 현재 새 data를 받을 공간이 없다고 <code>win=0</code>을 광고한 상태다. Connection 종료가 아니라 일시 정지 신호다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Persist / window probe</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Zero-window 뒤 window update가 유실되어 양쪽이 영원히 기다리는 deadlock을 피하려 sender가 작은 probe를 주기적으로 보내 receiver의 현재 window를 다시 확인하는 메커니즘이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Backpressure</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Downstream이 처리할 수 없을 때 upstream의 생산 속도를 늦추는 압력. TCP rwnd는 connection 한 구간의 backpressure이고 application queue·stream demand·rate limit은 더 위 계층의 별도 장치다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">BDP</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Bandwidth-Delay Product. 대역폭×RTT로, path를 계속 채우는 데 필요한 대략적인 in-flight data 양이다. Window가 BDP보다 작으면 loss가 없어도 link를 다 쓰지 못한다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>“Network는 멀쩡한데 upload가 멈췄다”는 현상은 receiver application이 socket을 읽지 않아 생긴 정상적인 flow control일 수 있다. 반대로 rwnd가 충분한데 전송이 느리면 congestion, sender application, pacing, loss, CPU를 찾아야 한다. 둘을 분리하면 엉뚱한 MTU·timeout 변경을 피한다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Memory safety:</strong> Receiver는 무한히 빠른 sender의 byte를 모두 저장할 수 없다. rwnd는 sequence-space 경계로 수신 memory를 보호한다.</li>
+            <li><strong>Throughput:</strong> 1Gbps, RTT 100ms path의 BDP는 약 12.5MB다. Window가 65,535B에 묶이면 이상적 상한도 약 5.24Mbps여서 Window Scale이 필요하다.</li>
+            <li><strong>장애 위치:</strong> Zero window는 packet drop이 아니라 “receiver TCP가 공간 부족을 광고했다”는 증거다. 왜 application이 읽지 못했는지는 CPU, GC, lock, disk/DB, downstream queue에서 찾아야 한다.</li>
+            <li><strong>분산 시스템:</strong> Proxy가 양쪽 TCP를 terminate하면 backend의 zero window가 곧바로 client rwnd가 되지 않는다. Proxy buffer가 먼저 차고 난 뒤 client-side read를 늦추는 별도 backpressure 경로가 형성된다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <p><strong>예시:</strong> Receiver가 <code>ACK=5001, win=4000</code>을 광고했고 Window Scale shift가 0이라고 하자. Sender는 5001~9000 범위만 새로 보낼 수 있다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:30%;">SENDER</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:40%;">PACKET / WINDOW</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:30%;">RECEIVER</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① App <code>write()</code><br>send buffer에 12KB</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#eef2ff;">← <code>ACK=5001, win=4000</code><br>허용 오른쪽 끝 9001</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">receive buffer<br>4KB 여유</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② <code>min(rwnd,cwnd)</code><br>경계 계산</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#eef2ff;"><code>seq 5001:9001 →</code><br>4KB in flight</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">Kernel이 4KB 수신<br>App은 아직 미읽기</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ 새 data 전송 정지<br>send queue 대기</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff1f2;">← <strong><code>ACK=9001, win=0</code></strong><br>zero window</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff1f2;">Buffer full<br>느린 consumer</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ Persist state<br>window probe</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff7e6;">작은 probe →<br>← 현재 ACK/window</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">App <code>read()</code><br>2KB 공간 회수</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#edf8f2;">⑤ 2KB 전송 재개<br>blocked writer 깨움</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#edf8f2;">← <code>ACK=9001, win=2000</code><br><code>seq 9001:11001 →</code></td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#edf8f2;">Window update<br>buffer 다시 사용</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>Receiver가 경계를 소유한다.</strong> ACK field는 다음 기대 sequence, Window field는 그 지점부터 받을 octet 수다. Sender가 임의로 늘릴 수 없다.</li>
+            <li><strong>Sender는 두 제약을 동시에 지킨다.</strong> Receiver 용량 rwnd와 network 용량 cwnd 중 작은 범위에서 이미 in-flight인 양을 빼고 새 전송 가능량을 구한다.</li>
+            <li><strong>Application stall이 packet에 드러난다.</strong> Receiver kernel이 byte를 정상 수신·ACK했어도 application이 읽지 않으면 free space가 줄어 win=0이 된다.</li>
+            <li><strong>Window update도 유실될 수 있다.</strong> 그래서 zero-window sender는 persist/probe로 현재 window를 다시 묻는다. Probe는 장애를 고치는 data flood가 아니다.</li>
+            <li><strong>Backpressure가 위로 이동한다.</strong> Sender send buffer가 차면 blocking write는 잠들고 nonblocking write는 <code>EAGAIN</code>을 낼 수 있다. Runtime queue와 request pool이 무제한이면 그곳에서 memory가 대신 터진다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>성공 경계:</strong> ACK가 전진하면 receiver TCP가 byte를 연속 수신했다. Window가 다시 열리면 receiver가 buffer 공간을 제공한다. 둘 다 application의 business 처리 완료를 뜻하지 않는다. Flow control의 불변식은 sender가 receiver가 광고한 sequence-space 오른쪽 경계를 넘지 않는 것이다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Window는 buffer 크기와 같지만은 않다</h3>
+          <p>개념적으로 available receive space가 rwnd의 기반이지만 OS는 metadata, out-of-order queue, memory pressure, autotuning, application의 low-water mark를 함께 고려한다. 따라서 <code>SO_RCVBUF=1MB</code>라고 매 ACK가 정확히 1MB window를 광고한다고 단정하면 안 된다. Packet의 Window field와 scale, <code>ss -tinm</code>의 socket memory를 함께 본다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:27%;">상태</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">Owner와 의미</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;"><code>RCV.NXT</code></td><td style="padding:9px;border:1px solid #dbe3e8;">Receiver TCP가 다음으로 기대하는 sequence. Receive window의 왼쪽 경계이자 ACK number의 기반이다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;"><code>RCV.WND</code></td><td style="padding:9px;border:1px solid #dbe3e8;">Receiver가 수신할 수 있는 octet 수. 오른쪽 경계는 개념적으로 <code>RCV.NXT+RCV.WND</code>다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;"><code>SND.UNA</code></td><td style="padding:9px;border:1px solid #dbe3e8;">Sender가 아직 ACK받지 못한 가장 오래된 sequence. ACK 전진 시 send buffer를 회수할 기준이다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;"><code>SND.NXT</code></td><td style="padding:9px;border:1px solid #dbe3e8;">Sender가 다음에 전송할 sequence. 광고 window와 congestion 경계를 넘지 않아야 한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;"><code>SND.WND</code></td><td style="padding:9px;border:1px solid #dbe3e8;">Sender가 마지막으로 유효하게 받아들인 peer advertised window. 오래되거나 재정렬된 window update를 함부로 적용하지 않도록 ACK/sequence 문맥을 사용한다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">16-bit Window와 Window Scale</h3>
+          <p>TCP header의 Window field는 16-bit unsigned 값이라 scale이 없으면 최대 65,535다. RFC 7323 Window Scale option은 SYN에서 방향별 shift count를 협상하며 최대 shift는 14다. 예를 들어 field 32,768과 shift 8이면 effective window는 <code>32,768×256=8,388,608B</code>다. SYN·SYN-ACK 자체의 Window field는 scale하지 않고, option이 성공적으로 교환된 뒤 후속 segment에 적용한다.</p>
+          <p>Scale은 buffer를 만들어 주지 않는다. 큰 BDP path의 표현 범위를 넓힐 뿐이며 실제 window는 memory·autotuning·application read 속도에 의해 달라진다. SYN에서 option이 빠지면 connection 중간에 새로 켤 수 없으므로 middlebox option stripping도 성능 원인이 된다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">rwnd와 cwnd를 수치로 분리하기</h3>
+          <p>단순화하면 새로 보낼 수 있는 양은 <code>max(0, min(rwnd,cwnd)-bytes_in_flight)</code>다. 예를 들어 rwnd=256KB, cwnd=64KB, in-flight=48KB면 congestion limit 때문에 약 16KB만 더 보낼 수 있다. 반대로 rwnd=32KB, cwnd=1MB, in-flight=24KB면 receiver limit 때문에 약 8KB다. 실제 stack은 SACK, retransmission, pacing, offload, application send queue를 더 고려한다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:33%;">관측</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">우선 가설</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">rwnd 작음, cwnd 큼</td><td style="padding:9px;border:1px solid #dbe3e8;">Receiver buffer/application read가 병목인 flow-control limited 상태.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">rwnd 큼, cwnd 작음</td><td style="padding:9px;border:1px solid #dbe3e8;">Slow start, loss, ECN, congestion algorithm 등 network feedback가 제한.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">둘 다 큼, 전송 없음</td><td style="padding:9px;border:1px solid #dbe3e8;">Sender application 미생산, send buffer/lock, pacing, scheduler, protocol-level credit를 확인.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">win=0 반복</td><td style="padding:9px;border:1px solid #dbe3e8;">Receiver app stall·작은 buffer·downstream block. Probe가 보이면 TCP는 살아 있을 수 있다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">Silly Window Syndrome와 작은 update</h3>
+          <p>Receiver가 몇 byte씩 window를 열고 sender가 그때마다 tiny segment를 보내면 header·interrupt·ACK 비용이 폭증한다. Receiver는 의미 있는 공간이 생길 때까지 작은 window 광고를 억제하고, sender는 작은 data 전송을 합치는 전략을 사용할 수 있다. 하지만 latency-sensitive traffic, <code>TCP_NODELAY</code>, delayed ACK, Nagle 상호작용은 workload에 따라 trade-off가 달라 일괄 설정하지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Data path와 control path</h3>
+          <p>Receive buffer 소비는 application data path지만 그 결과가 ACK Window field라는 control feedback으로 반대 방향에 전달된다. NAT/LB는 보통 window 값을 바꾸지 않고 전달하지만 TCP proxy는 자체 receive/send buffer와 두 독립 window를 만든다. HTTP/2·QUIC처럼 application/transport 위에 stream-level flow control이 추가되면 connection window가 열려 있어도 특정 stream credit가 0이라 멈출 수 있다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Buffer sizing</td><td style="padding:9px;border:1px solid #dbe3e8;">Bandwidth·RTT·connection 수·memory budget을 함께 계산한다. Per-socket 16MB를 10만 connection에 허용하면 이론상 1.6TB다. OS autotuning 상·하한과 cgroup/container memory를 포함한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Read loop</td><td style="padding:9px;border:1px solid #dbe3e8;">Socket read thread에서 긴 CPU 작업·blocking DB call을 하지 말고 bounded queue로 넘긴다. Queue가 찼을 때 read를 늦춰 의도적으로 TCP backpressure를 전달하되 timeout/cancellation 정책을 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Nonblocking write</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>EAGAIN</code>을 busy loop로 재시도하지 않고 event readiness와 deadline을 사용한다. Application user-space queue를 무제한으로 키워 kernel backpressure를 숨기지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Proxy/LB</td><td style="padding:9px;border:1px solid #dbe3e8;">Front/back socket buffer, request/response buffering, high/low watermark, per-connection limit을 문서화한다. Backend stall 때 proxy memory가 먼저 차는 failure window를 부하 테스트한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Pool/queue</td><td style="padding:9px;border:1px solid #dbe3e8;">Flow-control stall connection이 pool slot을 점유하는 시간을 제한한다. Bounded concurrency, queue deadline, bulkhead로 한 slow consumer가 전체 worker를 잡지 못하게 한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">Zero-window count·duration, advertised window, send/receive queue, socket memory, blocked write time, app queue depth, event-loop lag, downstream latency를 같은 connection/timestamp로 묶는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Security</td><td style="padding:9px;border:1px solid #dbe3e8;">Slow-read/slow-write peer가 buffer와 connection을 오래 점유할 수 있다. Header/body deadline, minimum progress, per-client connection·memory quota, load shedding을 계층화한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Version 확인</td><td style="padding:9px;border:1px solid #dbe3e8;">Buffer autotuning, max window, memory pressure, <code>ss</code> 필드 의미는 kernel마다 다르다. RFC의 wire invariant와 특정 OS 구현값을 구분하고 canary에서 packet·socket telemetry로 검증한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border:1px solid #f0cf88;padding:14px 16px;"><strong>Anti-pattern:</strong> Zero window를 보자마자 receive buffer만 크게 늘리거나, blocking write를 별도 unbounded thread에 숨기거나, proxy buffering을 무제한으로 켜지 않는다. 병목을 뒤로 미루며 memory·tail latency·failure blast radius를 키울 뿐이다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> Upload request의 throughput이 0에 가까워지고 client write가 30초씩 block된다. Loss와 retransmission은 낮지만 일부 flow에서 TCP zero window가 반복된다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:23%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>증상</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Endpoint·backend·AZ·payload size·connection age별 throughput, blocked write time, request deadline, zero-window duration, active connection·pool occupancy를 분리한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>먼저 수집할 증거/지표</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">양 끝 pcap의 ACK/window/scale/probe, <code>ss -tinm</code>의 send-q·recv-q·skmem·cwnd·rtt, receiver thread dump·event-loop lag·CPU/GC, app queue, disk/DB/downstream latency, proxy front/back buffer를 변경 전에 저장한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>가능한 가설</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Receiver app 미읽기, event loop blocking, bounded queue 포화, downstream DB/disk stall, 작은 고정 SO_RCVBUF, container memory pressure, proxy buffering 한계, Window Scale 미협상, 반대 방향 capture 해석 오류를 세운다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>안전한 첫 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">문제 backend를 소량 drain하고 신규 대용량 upload concurrency를 제한한다. 느린 downstream 호출을 canary에서 격리하고, receiver read loop가 다시 돌도록 가역적인 부하 완화·worker 복구를 적용한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>Rollback/복구</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">최근 buffer/watermark/event-loop/proxy 설정과 배포를 known-good으로 원복한다. recv-q 감소→window update→sender write 재개→pool 회수→request SLO 회복 순서를 확인하고 traffic을 단계적으로 복귀한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>하지 말아야 할 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">전 fleet buffer 무제한 확대, 모든 socket 강제 종료, retry·timeout 동시 확대, evidence 전 proxy 우회, zero-window probe를 공격으로 단정, sender pcap만 보고 receiver application 원인을 확정하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: 느린 reader와 zero window 관찰</h2>
+          <p><strong>목표:</strong> 작은 receive buffer를 가진 server가 12초간 읽지 않도록 만들어 client <code>sendall()</code>이 block되는 과정, ACK window 감소·zero window·window update와 socket queue를 연결한다.</p>
+          <p><strong>사전 조건:</strong> Docker Desktop과 이 저장소, 터미널 3개. 격리된 lab의 api container에 TCP 9000 test server를 임시 실행하며 host 설정은 바꾸지 않는다. 먼저 결과를 예측한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 예측 (3분)</h3>
+          <ol style="padding-left:22px;">
+            <li>Server kernel이 data를 ACK했지만 application이 읽지 않으면 recv-q와 advertised window는 어떻게 변할까?</li>
+            <li>Client <code>sendall()</code>은 8MB를 즉시 peer application에 전달했다고 반환할까?</li>
+            <li>12초 후 server가 읽기 시작하면 어떤 packet이 전송 재개를 허용할까?</li>
+          </ol>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · Lab 시작과 slow reader (8분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            make up
+          </div>
+          <p><strong>터미널 A:</strong> Server receive buffer를 작게 요청하고 accept 뒤 12초 동안 읽지 않는다.</p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec api python3 -u -c 'import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF,4096); s.bind(("0.0.0.0",9000)); s.listen(1); c,a=s.accept(); print("accepted",a); time.sleep(12); n=sum(len(b) for b in iter(lambda:(time.sleep(0.05),c.recv(1024))[1],b"")); print("read",n)'
+          </div>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · Packet과 socket 관측 (15분)</h3>
+          <p><strong>터미널 B:</strong> Capture를 먼저 실행한다.</p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client tcpdump -ni eth0 -tttt -nn -S -c 120 'host 172.28.0.20 and tcp port 9000'
+          </div>
+          <p><strong>터미널 C:</strong> 8MB를 보내고 소요 시간을 잰다.</p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client python3 -u -c 'import socket,time; s=socket.create_connection(("172.28.0.20",9000)); p=b"x"*(8*1024*1024); t=time.time(); s.sendall(p); print("send_seconds",round(time.time()-t,3)); s.shutdown(socket.SHUT_WR); time.sleep(2)'
+          </div>
+          <p>Client 전송이 block된 동안 터미널 C의 새 shell 또는 별도 터미널에서 두 endpoint를 관찰한다.</p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client ss -tinm 'dst 172.28.0.20 and dport = :9000'<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec api ss -tinm 'sport = :9000'
+          </div>
+          <p><strong>예상 관찰:</strong> Server recv-q가 증가하고 ACK의 window가 작아져 0이 될 수 있다. Client send-q에는 아직 peer가 받지 못한 byte가 남고 <code>sendall()</code>은 즉시 끝나지 않는다. 12초 후 server가 읽으면 window update가 나오고 전송이 재개된다. OS autotuning·offload로 정확한 숫자와 segment 수는 달라질 수 있으므로 순서와 상태 상관관계를 채점한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입의 의미 (4분)</h3>
+          <ol style="padding-left:22px;">
+            <li>Packet loss 없이도 sender가 멈추는지 확인한다.</li>
+            <li><code>win=0</code> 직전 server recv-q와 client send-q를 기록한다.</li>
+            <li>Window update 뒤 client가 재개되는 timestamp와 server read 시작 시점을 맞춘다.</li>
+          </ol>
+
+          <h3 style="font-size:18px;color:#075985;">자주 나는 오류와 해결 · cleanup (5분)</h3>
+          <ul style="padding-left:22px;">
+            <li><code>Address already in use</code>면 이전 test server가 남았는지 <code>ss -lntp 'sport = :9000'</code>으로 확인하고 해당 lab process만 종료한다.</li>
+            <li>Zero window가 안 보이면 Window Scale을 반영해 raw <code>win</code>을 해석하고, capture count를 늘리기 전에 recv-q/send-q와 server의 12초 sleep을 확인한다.</li>
+            <li><code>ss</code>가 비면 client connection이 이미 끝난 것이다. 8MB payload를 유지하고 전송 시작 직후 관찰한다.</li>
+            <li>GSO/GRO 때문에 큰 segment로 보이면 wire packet 수를 단정하지 말고 ACK window 변화와 socket queue를 우선 본다.</li>
+          </ul>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            make down
+          </div>
+          <p><strong>Cleanup 확인:</strong> <code>docker compose -f labs/basic-network-observability/docker-compose.yml ps</code>에 실행 중인 lab container가 없어야 한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Window field를 그대로 byte로 읽지 않는다.</strong> SYN에서 협상된 방향별 Window Scale을 적용해야 한다.</li>
+            <li><strong>SYN의 Window field는 scale하지 않는다.</strong> SYN의 option은 후속 segment 해석에 쓸 shift count를 협상한다.</li>
+            <li><strong>Zero window는 connection dead가 아니다.</strong> ACK·probe가 오갈 수 있고 application이 읽으면 다시 열린다.</li>
+            <li><strong>Receive window와 congestion window를 섞지 않는다.</strong> rwnd는 receiver capacity, cwnd는 sender의 network feedback 상태다.</li>
+            <li><strong>Receive buffer를 application queue로 보지 않는다.</strong> Kernel socket memory와 runtime/user-space queue는 서로 다른 owner·limit·metric을 갖는다.</li>
+            <li><strong>ACK를 처리 완료로 번역하지 않는다.</strong> Byte가 kernel에 도착했을 뿐 DB commit·파일 flush·consumer 처리 완료는 별도다.</li>
+            <li><strong>큰 buffer가 항상 빠르지 않다.</strong> BDP를 채우는 데 도움 되지만 connection 수가 많으면 memory와 queueing delay, 장애 체류 시간을 키운다.</li>
+            <li><strong>Proxy 환경에서 client pcap 하나로 backend를 단정하지 않는다.</strong> 두 TCP connection의 window·queue를 각각 관측한다.</li>
+            <li><strong>Application-level flow control을 생략하지 않는다.</strong> HTTP/2 stream, gRPC demand, Kafka fetch, file pipeline queue는 TCP window만으로 공정성·business capacity를 표현하지 못한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“ACK=10001, Window field=32768, scale=7입니다. Sender가 이해할 수신 범위를 설명하세요.”</strong><br>좋은 답변 구조: Window field unsigned 16-bit → effective rwnd=4,194,304B → 왼쪽 10001, 오른쪽 exclusive 4,204,305 → 이미 in-flight와 cwnd를 함께 제한 → SYN field 예외·방향별 scale.</li>
+            <li><strong>“Loss는 낮은데 upload가 멈추고 zero window가 보입니다. 어디부터 진단합니까?”</strong><br>좋은 답변 구조: receiver가 광고 주체임을 명시 → 양 끝 pcap scale/ACK → recv-q·skmem → app read loop·CPU/GC/lock → downstream DB/disk → proxy 두 connection → safe drain·concurrency 제한 → buffer 확대 trade-off.</li>
+            <li><strong>“1Gbps, RTT 100ms 서비스의 socket buffer를 어떻게 정합니까?”</strong><br>좋은 답변 구조: BDP 12.5MB 계산 → Window Scale 필요 → connection 수·memory 총량 → autotuning 상한 → workload payload/RTT 분포 → cwnd·loss도 별도 → 부하 테스트와 zero-window/throughput/SLO로 검증.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>첫 RTT가 100ms일 때 RFC 6298 기준 SRTT·RTTVAR·계산 RTO는?</li>
+            <li><code>ACK=2001, SACK=3001:4001</code>이 말하는 gap은?</li>
+            <li>TCP retransmission과 application retry의 성공 경계가 다른 이유는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 100ms, 50ms, 계산 300ms이며 baseline 1초 하한을 구분한다. ② 2001:3001이 비었고 3001:4001은 선택 수신됐다. ③ TCP는 한 connection의 byte stream을 복구하지만 retry는 transaction 결과가 불명확한 새 request를 만들 수 있어 idempotency가 필요하다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>rwnd=256KB, cwnd=64KB, in-flight=48KB일 때 단순화한 새 전송 가능량은?</li>
+            <li>ACK=5001, win=0은 무엇을 확정하고 무엇을 확정하지 않는가?</li>
+            <li>Proxy의 backend-side rwnd가 0이 되었을 때 client-side가 즉시 같은 win=0이 아닐 수 있는 이유는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① <code>min(256,64)-48=16KB</code>. ② 5000까지 연속 수신했고 현재 5001부터 새 byte 공간이 없음을 알리지만 application 처리 완료나 connection 종료는 뜻하지 않는다. ③ Proxy가 두 TCP를 terminate하고 자체 buffer를 소유하므로 backend stall을 먼저 흡수한 뒤 buffer watermark에서 client read를 늦춘다. 문항당 수치/정의 1점, owner·state 1점, 장애·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9293.html" style="color:#0369a1;">RFC 9293 · 현재 TCP 기본 규격, Window field와 window 관리</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc7323.html" style="color:#0369a1;">RFC 7323 · TCP Window Scale과 Timestamp 확장</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc5681.html" style="color:#0369a1;">RFC 5681 · congestion window를 포함한 TCP congestion control</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc1122.html" style="color:#0369a1;">RFC 1122 · Host requirements와 zero-window probe·Silly Window Syndrome 배경</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 18</strong><br>
+            <span>Congestion window, slow start, loss — network가 감당할 수 있는 in-flight 양을 ACK clock과 congestion signal로 추정하는 feedback control을 수치와 packet timeline으로 파고듭니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-17T09:00:47+09:00",
+  "updatedAt": "2026-08-18T09:00:36+09:00",
   "lessons": [
     {
       "day": 1,
@@ -149,6 +149,15 @@
       "path": "day-16.html",
       "kind": "lesson",
       "publishedAt": "2026-08-17T09:00:47+09:00"
+    },
+    {
+      "day": 17,
+      "week": 3,
+      "title": "receive window와 flow control",
+      "summary": "Receive buffer와 advertised window의 sequence-space 경계, Window Scale·zero-window/persist를 이해하고, 느린 consumer의 backpressure가 send buffer·proxy·pool·application queue로 전파되는 과정을 진단합니다.",
+      "path": "day-17.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-18T09:00:36+09:00"
     }
   ]
 }
