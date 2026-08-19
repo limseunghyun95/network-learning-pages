@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 18</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 3 / DAY 18</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">congestion window, slow start, loss</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">ACK clock으로 path capacity를 탐색하는 feedback control · 예상 학습 60분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            TCP sender는 path의 빈 capacity를 직접 알 수 없으므로 <strong>cwnd(congestion window)</strong>만큼만 data를 in-flight로 두고 ACK가 돌아오면 늘리며, loss·ECN 신호를 받으면 줄인다. Slow start는 대략 RTT마다 window를 두 배로 탐색하고 congestion avoidance는 더 조심스럽게 증가한다. 이 feedback loop를 무시한 burst·다중 connection·retry는 queue와 tail latency를 폭발시킨다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Congestion</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">여러 sender가 network link·router queue가 처리할 수 있는 양보다 빠르게 packet을 주입해 queue delay와 drop이 커지는 상태다. Receiver memory 부족인 flow control과 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">cwnd</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Congestion window. 한 TCP sender가 ACK 없이 network에 둘 수 있는 data 양을 제한하는 per-connection 상태다. Wire header에 직접 실려 오지 않고 sender kernel이 계산한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">rwnd</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Receiver가 광고하는 receive window. 실제 전송 한도는 단순화하면 <code>min(cwnd,rwnd)</code>이며 오늘의 cwnd와 owner가 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">FlightSize</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">보냈지만 아직 cumulative ACK되지 않은 data 양. cwnd는 허용 한도이고 FlightSize는 현재 사용량이므로 둘을 같은 숫자로 가정하지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SMSS</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Sender Maximum Segment Size. Sender가 한 TCP segment에 담을 수 있는 최대 data byte 수다. cwnd를 “몇 segment”로 설명할 때 단위가 된다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">IW</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Initial Window. 3-way handshake 뒤 처음 사용할 cwnd다. RFC 6928은 조건하에 최대 10 segment로 늘리는 표준을 정의하지만 실제 stack·path 정책을 확인한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">ssthresh</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Slow Start Threshold. cwnd가 이 경계보다 작을 때 빠른 탐색인 slow start, 큰 쪽에서는 완만한 congestion avoidance를 선택하는 sender 상태다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Slow start</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">처음 보는 path에서 ACK된 새 data에 비례해 cwnd를 빠르게 늘리는 알고리즘. 이름은 slow지만 선형이 아니라 이상적인 조건에서 대략 RTT마다 두 배로 증가한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Congestion avoidance</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Capacity 근처라고 판단한 뒤 더 보수적으로 window를 늘리는 단계. Reno 계열 기준은 대략 RTT당 1 SMSS 증가이며 CUBIC은 다른 성장 함수를 쓴다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">ACK clock</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">ACK가 돌아온 만큼 새 data를 내보내 packet 간격을 path 처리 속도에 맞추는 feedback 리듬이다. ACK compression·delayed ACK·idle restart가 이 리듬에 영향을 준다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">ECN</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Explicit Congestion Notification. Queue가 packet을 drop하기 전에 IP/TCP bit로 congestion을 알릴 수 있게 하는 협상 가능한 신호다. 사용 여부는 endpoint와 path 지원에 달렸다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Pacing</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">cwnd가 허용한 packet을 한꺼번에 burst로 보내지 않고 시간 간격을 두어 전송하는 기법. cwnd라는 양의 제한과 pacing이라는 시간축 제한은 보완 관계다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">AQM / bufferbloat</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">AQM은 Active Queue Management로 queue가 가득 차기 전에 mark/drop해 신호를 주는 방식이다. Bufferbloat는 지나치게 큰 queue가 drop은 줄여도 지연을 크게 만드는 현상이다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>대역폭이 10Gbps라고 application이 즉시 10Gbps를 쓰는 것은 아니다. 새 connection은 path capacity를 모르고 작은 IW에서 시작하며 RTT마다 feedback을 받아야 한다. 짧은 request는 slow start 안에서 끝나고, 긴 flow는 loss와 congestion avoidance를 거쳐 안정점에 접근한다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Latency:</strong> Queue가 쌓이면 loss 전부터 RTT가 증가한다. 평균 throughput이 좋아도 interactive request p99가 나빠질 수 있다.</li>
+            <li><strong>Throughput:</strong> 10Gbps, RTT 20ms path의 BDP는 약 25MB다. rwnd가 충분해도 cwnd가 2MB면 이상적인 전송률 상한은 대략 800Mbps 수준이다.</li>
+            <li><strong>Failure feedback:</strong> Loss가 늘면 TCP는 줄이지만 application retry는 새 connection·새 request를 추가해 반대 방향으로 부하를 키울 수 있다.</li>
+            <li><strong>공정성:</strong> cwnd는 connection별 상태다. 한 client가 connection을 수십 개 열면 단일 flow보다 큰 aggregate share를 차지할 수 있어 connection 수·rate limit도 설계해야 한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <p><strong>학습용 예시:</strong> SMSS=1KB, IW=4KB, ssthresh=8KB로 단순화한다. 실제 IW·증가·감소는 RFC, ACK pattern, congestion algorithm과 kernel version에 따라 다르다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">SENDER KERNEL</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:42%;">PATH / ACK CLOCK</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">RECEIVER</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① <code>cwnd=4KB</code><br><code>ssthresh=8KB</code><br>slow start</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#eef2ff;">4×1KB segment →<br>router queue·link</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">rwnd 충분<br>새 data ACK</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② ACK된 byte만큼 증가<br><code>cwnd≈8KB</code></td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#edf8f2;">← ACK stream<br>한 RTT에 4KB 확인</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">ACK가 network에서<br>빠진 packet을 증명</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ threshold 도달<br>avoidance 진입</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#eef2ff;">8KB flight →<br>대략 RTT당 완만한 증가</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">ACK clock 유지<br>rwnd 광고</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff1f2;">④ loss signal<br><code>ssthresh≈Flight/2</code></td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff1f2;">segment loss<br>duplicate ACK/SACK ←<br>또는 ECN mark</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">Out-of-order ACK<br>gap 보고</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff7e6;">⑤ Fast recovery<br>감소된 cwnd로 재개</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff7e6;">재전송 →<br>← 누적 ACK 전진</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">Gap 복구<br>ordered stream</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff1f2;">⑥ RTO라면 더 강한 반응<br>RFC 5681 LW=1 SMSS</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">ACK clock 소실<br>timeout 후 slow start</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">응답 증거 부족</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>초기 탐색:</strong> Sender는 handshake 성공만으로 bottleneck bandwidth·queue를 모른다. IW 범위만 보내고 ACK를 기다린다.</li>
+            <li><strong>ACK가 clock을 만든다:</strong> ACK된 새 byte는 data가 path를 빠져나갔다는 증거다. Slow start는 그만큼 cwnd를 늘려 대략 RTT마다 flight를 두 배로 탐색한다.</li>
+            <li><strong>경계 전환:</strong> cwnd가 ssthresh 부근에 오면 capacity 근처라고 보고 congestion avoidance의 완만한 성장으로 바꾼다.</li>
+            <li><strong>Congestion 신호:</strong> Drop은 무선 오류·policer 등 다른 원인도 가능하지만 loss-based TCP는 보수적으로 congestion으로 해석한다. ECN은 drop 없이 명시적 신호를 줄 수 있다.</li>
+            <li><strong>회복 강도:</strong> Duplicate ACK는 뒤 packet이 도착해 ACK clock이 남았다는 증거라 fast recovery가 가능하다. RTO는 feedback 자체가 끊긴 강한 신호라 cwnd를 더 작게 재시작한다.</li>
+            <li><strong>Application 경계:</strong> ACK와 cwnd 증가는 receiver TCP 수신을 뜻할 뿐 request 처리·DB commit을 확정하지 않는다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>상태 소유권과 불변식:</strong> cwnd·ssthresh·congestion algorithm·pacing은 sender kernel의 per-connection state, rwnd는 receiver가 광고한 state, queue는 각 router/NIC/LB가 소유한다. Sender는 가장 높은 ACK보다 <code>min(cwnd,rwnd)</code>를 넘어서는 sequence를 전송하지 않아야 하며, ACK되지 않은 data를 capacity 증거 없이 무제한 늘리지 않는다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Slow start는 왜 지수적으로 보이는가</h3>
+          <p>RFC 5681의 기본 원리에서 새 data를 ACK할 때 cwnd를 최대 SMSS만큼 늘린다. 한 RTT에 cwnd만큼 보내고 그 전체가 ACK되면 다음 RTT의 cwnd가 대략 두 배가 된다. IW=10 segment라면 이상적인 예시는 10→20→40→80 segment다. Delayed ACK, Appropriate Byte Counting, application 미생산, rwnd, loss, pacing 때문에 실제 증가는 정확히 두 배가 아닐 수 있다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:25%;">RTT</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:32%;">cwnd 예시</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">주의</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">0</td><td style="padding:9px;border:1px solid #dbe3e8;">10 SMSS</td><td style="padding:9px;border:1px solid #dbe3e8;">RFC 6928의 상한 예시이며 stack이 실제로 10인지 packet/socket에서 확인.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">1</td><td style="padding:9px;border:1px solid #dbe3e8;">약 20 SMSS</td><td style="padding:9px;border:1px solid #dbe3e8;">새 data가 모두 ACK되고 rwnd·application이 충분한 경우.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">2</td><td style="padding:9px;border:1px solid #dbe3e8;">약 40 SMSS</td><td style="padding:9px;border:1px solid #dbe3e8;">Bottleneck queue가 빠르게 차며 RTT가 먼저 증가할 수 있음.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">3</td><td style="padding:9px;border:1px solid #dbe3e8;">약 80 SMSS</td><td style="padding:9px;border:1px solid #dbe3e8;">ssthresh 또는 congestion 신호에서 이 성장은 중단.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">Reno 계열의 AIMD와 ssthresh</h3>
+          <p>Congestion avoidance에서는 cwnd를 대략 RTT당 1 SMSS 늘리는 additive increase로 여유를 탐색한다. Loss가 감지되면 multiplicative decrease로 줄인다. RFC 5681은 RTO로 새 loss를 감지할 때 <code>ssthresh=max(FlightSize/2,2×SMSS)</code> 이하로 정하고 cwnd를 loss window 1 SMSS 이하로 두도록 규정한다. 여기서 <strong>cwnd가 아니라 실제 FlightSize를 반으로 하는 점</strong>이 면접 단골 함정이다.</p>
+          <p>세 duplicate ACK 기반 fast recovery는 뒤 segment들이 receiver에 도착했다는 증거를 이용해 ACK clock을 보존한다. 반면 timeout은 feedback이 사라진 상태라 더 보수적으로 slow start부터 다시 시작한다. 현대 stack은 SACK·RACK 등 더 발전된 recovery를 결합하므로 packet만 보고 고전 Reno 단계 이름을 단정하지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">CUBIC은 시간축으로 window를 성장시킨다</h3>
+          <p>고속·장거리 path에서 Reno의 RTT당 1 segment 증가는 BDP를 다시 채우는 데 너무 오래 걸릴 수 있다. RFC 9438 CUBIC은 마지막 congestion event 이후 경과 시간의 cubic 함수로 window를 성장시켜 이전 최대치 근처에서는 조심스럽고 그보다 멀어지면 더 빠르게 탐색한다. Reno-friendly 동작과 multiplicative decrease도 포함하지만 exact parameter·hybrid slow start·pacing 조합은 kernel version별로 확인한다.</p>
+          <div style="background:#fff7e6;border:1px solid #f0cf88;padding:14px 16px;"><strong>Version 함정:</strong> “Linux는 항상 CUBIC”, “모든 cloud LB도 같은 cwnd”, “초기 cwnd는 무조건 10”이라고 단정하지 않는다. Endpoint OS, container가 공유하는 host kernel, proxy termination, sysctl/socket option, QUIC userspace stack이 각각 다른 congestion controller를 소유할 수 있다.</div>
+
+          <h3 style="font-size:18px;color:#075985;">Loss 전에도 congestion은 보인다</h3>
+          <p>Packet이 bottleneck에 도착하는 속도가 service rate를 넘으면 queue가 먼저 자라 RTT가 baseline보다 상승한다. Drop-tail queue는 가득 찰 때 loss를 내므로 buffer가 크면 loss는 낮지만 latency가 길어지는 bufferbloat가 생긴다. AQM·ECN은 queue가 완전히 차기 전에 mark/drop으로 sender에 신호를 주려는 control path다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">관측 조합</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">가능한 해석과 반증</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">RTT↑, loss 낮음</td><td style="padding:9px;border:1px solid #dbe3e8;">Queue buildup/bufferbloat 후보. Baseline RTT, qdisc backlog, switch queue, app delay를 분리.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">cwnd↓, dup ACK/SACK</td><td style="padding:9px;border:1px solid #dbe3e8;">Fast loss recovery 후보. Reordering·policer·capture artifact도 반증.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">RTO, cwnd≈1 SMSS</td><td style="padding:9px;border:1px solid #dbe3e8;">강한 feedback 단절. Return ACK path, receiver stall, path drop을 양 끝에서 확인.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">rwnd↓, cwnd 충분</td><td style="padding:9px;border:1px solid #dbe3e8;">Congestion보다 receiver flow control이 제한. recv-q와 app read를 확인.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">ECN mark/CWR</td><td style="padding:9px;border:1px solid #dbe3e8;">협상된 명시적 congestion signal. Endpoint·middlebox의 ECN 지원과 counter를 확인.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">Control loop와 분산 시스템</h3>
+          <p>TCP loop의 시간 단위는 RTT다. 긴 RTT path는 같은 algorithm에서도 feedback이 늦고 recovery가 느리다. Proxy가 TCP를 terminate하면 client↔proxy와 proxy↔backend가 각자 cwnd·RTT·loss를 가진다. Application retry는 기존 loop가 줄어드는 순간 새 connection의 IW burst를 추가할 수 있어 transport control을 무력화하는 positive feedback이 된다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Baseline 측정</td><td style="padding:9px;border:1px solid #dbe3e8;">Idle/min RTT와 부하 RTT를 분리하고 bandwidth·RTT로 BDP를 계산한다. Throughput 숫자만 보면 queue delay와 window-limited 상태를 놓친다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Connection reuse</td><td style="padding:9px;border:1px solid #dbe3e8;">짧은 request마다 새 connection을 만들면 DNS/TCP/TLS뿐 아니라 cwnd 학습도 반복한다. Bounded keep-alive pool을 쓰되 max-age·drain·endpoint 변경을 관리한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Burst 제어</td><td style="padding:9px;border:1px solid #dbe3e8;">Pacing, application batch 크기, rate limit, token bucket으로 microburst를 줄인다. Average Mbps가 link보다 낮아도 짧은 burst가 shallow queue를 넘길 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Retry budget</td><td style="padding:9px;border:1px solid #dbe3e8;">Loss·timeout 시 retry를 즉시 늘리지 않는다. 한 계층이 bounded attempts, exponential backoff+jitter, 전체 deadline, retry budget을 소유해 congestion feedback과 같은 방향으로 load를 줄인다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Algorithm 변경</td><td style="padding:9px;border:1px solid #dbe3e8;">CUBIC/다른 controller를 fleet 전체에 바로 바꾸지 말고 RTT·loss·fairness·queue·CPU·rollback을 canary에서 비교한다. LB/proxy/QUIC termination마다 owner를 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">cwnd·ssthresh·rtt/rttvar·retrans·bytes-in-flight·pacing rate, qdisc/NIC/switch drop·ECN, rwnd, request p99를 같은 5-tuple·timestamp로 묶는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Capacity/보안</td><td style="padding:9px;border:1px solid #dbe3e8;">Per-client connection·rate·bandwidth quota와 load shedding을 둔다. 다중 connection으로 fairness를 우회하거나 ACK manipulation으로 cwnd를 부풀리는 abuse를 경계한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Cloud 비용</td><td style="padding:9px;border:1px solid #dbe3e8;">Cross-AZ/region path는 RTT·loss뿐 아니라 전송 비용이 다르다. 압축·batch·placement를 조정하되 큰 batch가 burst와 retry 비용을 키우는 trade-off를 측정한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border:1px solid #f0cf88;padding:14px 16px;"><strong>Anti-pattern:</strong> Loss가 보인다고 timeout·buffer·parallel connection을 동시에 늘리거나, speed test 한 번으로 production congestion algorithm을 바꾸거나, p99 악화를 “대역폭 부족” 한 문장으로 끝내지 않는다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> 배포 직후 cross-AZ upload p99가 500ms에서 8초로 증가하고 retransmission·RTO·retry traffic이 함께 상승했다. 평균 link utilization은 55%다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:23%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>증상</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">AZ·source/destination·payload·connection age·client version별 p50/p99, goodput, retry amplification, loss/RTO, baseline 대비 RTT 증가와 시작 시점을 나눈다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>먼저 수집할 증거/지표</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">양 끝 pcap의 seq/ACK/SACK/ECN/timestamp, <code>ss -tinm</code>의 cwnd·ssthresh·rtt·rto·retrans·pacing·rwnd, qdisc/NIC/softnet/switch/LB queue·drop, connection·retry rate, app queue를 변경 전에 보존한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>가능한 가설</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Microburst와 queue drop, bufferbloat, policer, asymmetric ACK loss, MTU black hole, reordering/spurious retransmit, congestion algorithm/initial window 변경, connection fan-out, retry storm, receiver flow control을 병렬로 세운다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>안전한 첫 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Retry budget·concurrency·batch burst를 먼저 제한하고 문제 AZ/path traffic을 여유 capacity가 검증된 경로로 소량 우회한다. 정상/비정상 flow의 socket+pcap을 비교한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>Rollback/복구</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">최근 client/LB congestion-control·pacing·MTU·batch·retry 변경을 한 항목씩 known-good으로 원복한다. RTT queueing→loss/RTO→cwnd→goodput→p99→retry load 순서로 회복을 검증하고 traffic을 단계 복귀한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>하지 말아야 할 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">평균 utilization만 보고 capacity 여유 단정, 모든 client connection 수 확대, timeout·retry 동시 상향, 전 fleet algorithm 변경, buffer 무제한 확대, 한쪽 pcap의 retransmission label만으로 drop 위치 확정을 하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: delay/loss에서 cwnd와 ACK clock 관찰</h2>
+          <p><strong>목표:</strong> 격리된 Docker client→api bulk transfer에 40ms delay와 1% random loss를 주입하고, sender의 cwnd·rtt·retrans 변화와 packet gap·ACK를 연결한다.</p>
+          <p><strong>사전 조건:</strong> Docker Desktop, 이 저장소, 터미널 4개. Client에만 NET_ADMIN이 있어 client egress data path에 netem을 적용한다. Host network는 바꾸지 않으며 실행 전 결과를 예측한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 예측 (3분)</h3>
+          <ol style="padding-left:22px;">
+            <li>40ms one-way egress delay가 있을 때 관측 RTT와 cwnd 증가 속도는 어떻게 변할까?</li>
+            <li>1% loss에서 cwnd가 계속 단조 증가할까, 톱니 모양으로 움직일까?</li>
+            <li>rwnd가 충분한데 throughput이 줄면 어떤 socket 필드로 congestion limit를 증명할까?</li>
+          </ol>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · 시작과 알고리즘 확인 (5분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            make up<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client sysctl -n net.ipv4.tcp_congestion_control<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client tc qdisc show dev eth0
+          </div>
+          <p><strong>예상 관찰:</strong> Algorithm 이름은 환경의 host kernel 설정에 따라 다를 수 있다. Baseline qdisc를 기록한 뒤에만 실패를 주입한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · Receiver와 capture 준비 (7분)</h3>
+          <p><strong>터미널 A:</strong> 32MB를 받을 임시 receiver를 api container에 실행한다.</p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec api python3 -u -c 'import socket,time; s=socket.socket(); s.bind(("0.0.0.0",9001)); s.listen(1); c,a=s.accept(); t=time.time(); n=sum(len(b) for b in iter(lambda:c.recv(65536),b"")); print("bytes",n,"seconds",round(time.time()-t,3))'
+          </div>
+          <p><strong>터미널 B:</strong> Absolute sequence와 timestamp로 capture한다.</p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client tcpdump -ni eth0 -tttt -nn -S -c 220 'host 172.28.0.20 and tcp port 9001'
+          </div>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입과 전송 (15분)</h3>
+          <p><strong>터미널 C:</strong> 격리된 client egress에 delay/loss를 넣고 32MB를 보낸다.</p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client tc qdisc replace dev eth0 root netem delay 40ms loss 1%<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client tc -s qdisc show dev eth0<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client python3 -u -c 'import socket,time; s=socket.create_connection(("172.28.0.20",9001)); p=b"x"*65536; t=time.time(); [s.sendall(p) for _ in range(512)]; s.shutdown(socket.SHUT_WR); print("send_seconds",round(time.time()-t,3)); time.sleep(2)'
+          </div>
+          <p><strong>터미널 D:</strong> 전송 중 sender socket을 반복 관찰한다. 연결이 끝나면 자동으로 출력이 비므로 즉시 실행한다.</p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client sh -lc 'for i in $(seq 1 40); do date +%H:%M:%S; ss -tinm "dst 172.28.0.20 and dport = :9001"; sleep 0.2; done'
+          </div>
+          <p><strong>예상 관찰:</strong> <code>ss</code>에서 congestion algorithm, rtt/rttvar, cwnd, retrans 관련 값이 변한다. Capture에는 sequence gap 뒤 duplicate ACK/SACK·재전송이 보일 수 있다. Random loss라 매번 같은 packet이 사라지지 않으며, offload 때문에 capture segment 수와 wire packet 수는 다를 수 있다. 중요한 것은 loss timestamp 뒤 cwnd/throughput 변화의 순서다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">해석·오류 해결·cleanup (5분)</h3>
+          <ul style="padding-left:22px;">
+            <li><code>tc: Operation not supported</code>면 container capability와 <code>sch_netem</code> 지원을 확인한다. Host 전체 qdisc를 대신 변경하지 않는다.</li>
+            <li><code>Address already in use</code>면 lab 안 9001 listener만 확인하고 이전 test process를 종료한다.</li>
+            <li>전송이 너무 빨라 <code>ss</code>가 비면 payload를 무작정 크게 하기 전에 qdisc 적용, receiver 실행 순서, <code>tc -s</code> counter를 확인한다.</li>
+            <li>cwnd 단위는 출력·kernel에 따라 segment/byte 해석이 필요하다. MSS와 함께 기록한다.</li>
+            <li>Capture checksum 오류는 offload artifact일 수 있으므로 실제 수신 성공과 상대 capture로 반증한다.</li>
+          </ul>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client sh -lc 'tc qdisc del dev eth0 root 2&gt;/dev/null || true'<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client tc qdisc show dev eth0<br>
+            make down
+          </div>
+          <p><strong>Cleanup 확인:</strong> <code>netem</code>이 사라지고 lab container/network가 내려갔는지 확인한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>cwnd를 TCP header에서 찾지 않는다.</strong> Sender kernel 내부 상태이며 packet의 flight/ACK와 socket telemetry로 추론한다.</li>
+            <li><strong>cwnd와 FlightSize를 같다고 두지 않는다.</strong> Application이 data를 덜 만들거나 rwnd가 작으면 FlightSize는 cwnd보다 작다.</li>
+            <li><strong>Slow start가 항상 정확히 RTT마다 두 배라고 단정하지 않는다.</strong> ACK policy, byte counting, loss, rwnd, pacing, application-limited 상태가 바꾼다.</li>
+            <li><strong>Loss를 물리 network congestion 하나로 확정하지 않는다.</strong> Reordering, policer, NIC ring, virtual switch, MTU, 무선 오류, capture artifact를 반증한다.</li>
+            <li><strong>Loss가 낮다고 congestion이 없다고 보지 않는다.</strong> Queue delay와 ECN mark가 먼저 증가할 수 있다.</li>
+            <li><strong>평균 utilization로 microburst를 숨기지 않는다.</strong> 1분 평균 55%여도 millisecond queue는 넘칠 수 있다.</li>
+            <li><strong>모든 connection이 algorithm state를 공유한다고 보지 않는다.</strong> Connection마다 cwnd가 있고 proxy termination은 새 state를 만든다.</li>
+            <li><strong>Container 안의 TCP가 독립 kernel이라고 단정하지 않는다.</strong> 일반 container는 host kernel의 TCP stack과 algorithm을 namespace 설정과 함께 사용한다.</li>
+            <li><strong>Retry 성공을 congestion 해결로 보지 않는다.</strong> 새 attempt가 성공해도 aggregate load·queue·중복 side effect는 악화될 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“cwnd=64KB, rwnd=256KB, FlightSize=48KB입니다. 무엇을 더 보낼 수 있고 누가 각 상태를 소유합니까?”</strong><br>좋은 답변 구조: effective limit=min(64,256)=64KB → 약 16KB 추가 → cwnd sender, rwnd receiver, FlightSize sender 관측 → MSS/pacing/SACK 단순화 → ACK가 왔을 때 state transition.</li>
+            <li><strong>“Slow start와 congestion avoidance를 수치로 비교하고 loss 뒤 동작을 설명하세요.”</strong><br>좋은 답변 구조: IW·SMSS·RTT 가정 → 대략 10→20→40 exponential → ssthresh 경계 → Reno RTT당 약 1 SMSS → dup ACK fast recovery vs RTO 1 SMSS → CUBIC/version 대안.</li>
+            <li><strong>“평균 link 50%인데 p99와 retransmission이 급증했습니다. 어떻게 진단합니까?”</strong><br>좋은 답변 구조: 평균의 blind spot → baseline/loaded RTT → microburst/qdisc/NIC/switch queue → 양 끝 seq/SACK → cwnd/rwnd 분리 → retry fan-out → 안전한 concurrency/retry 제한 → rollback과 SLO 검증.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>ACK=5001, win=0은 무엇을 확정하고 무엇을 확정하지 않는가?</li>
+            <li>Window field 32768, scale 7의 effective receive window는?</li>
+            <li>Proxy backend-side zero window가 client-side에 즉시 같지 않을 수 있는 이유는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 5000까지 수신했고 새 공간이 0임을 알리지만 app 처리 완료·connection 종료는 아니다. ② 4,194,304B. ③ Proxy가 두 TCP와 자체 buffer를 소유해 backend stall을 먼저 흡수한 뒤 front-side read를 늦춘다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>SMSS=1KB, cwnd=16KB, rwnd=64KB, FlightSize=12KB라면 단순화한 추가 전송 가능량은?</li>
+            <li>왜 세 duplicate ACK loss와 RTO loss의 cwnd 반응이 다른가?</li>
+            <li>10Gbps, RTT 20ms path의 BDP는 몇 MB이며 cwnd=2MB일 때 대략적 throughput 상한은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① <code>min(16,64)-12=4KB</code>. ② Duplicate ACK는 뒤 packet이 빠져나가 ACK clock이 살아 있다는 증거지만 RTO는 feedback 단절이라 더 보수적으로 1 SMSS loss window에서 재시작한다. ③ BDP 약 25MB, <code>2MB/0.02s×8≈800Mbps</code>. 문항당 수치/정의 1점, owner·state 1점, 장애·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc5681.html" style="color:#0369a1;">RFC 5681 · TCP slow start, congestion avoidance, fast retransmit/recovery</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc6928.html" style="color:#0369a1;">RFC 6928 · TCP Initial Window를 최대 10 segment로 확대</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9438.html" style="color:#0369a1;">RFC 9438 · 고속·장거리 network를 위한 CUBIC</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc3168.html" style="color:#0369a1;">RFC 3168 · Explicit Congestion Notification</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 19</strong><br>
+            <span>Close, FIN/RST, TIME_WAIT — 양방향 byte stream 종료의 네 상태, active closer의 TIME_WAIT, abortive reset과 connection pool·LB idle timeout 장애를 packet/state timeline으로 추적합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

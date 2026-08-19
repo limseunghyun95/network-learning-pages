@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-18T09:00:36+09:00",
+  "updatedAt": "2026-08-19T09:21:16+09:00",
   "lessons": [
     {
       "day": 1,
@@ -158,6 +158,15 @@
       "path": "day-17.html",
       "kind": "lesson",
       "publishedAt": "2026-08-18T09:00:36+09:00"
+    },
+    {
+      "day": 18,
+      "week": 3,
+      "title": "congestion window, slow start, loss",
+      "summary": "Sender의 cwnd·ssthresh·ACK clock이 slow start와 congestion avoidance에서 path capacity를 탐색하고 loss·ECN에 반응하는 과정을 수치화하며, queue·retry·다중 connection의 실무 trade-off를 진단합니다.",
+      "path": "day-18.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-19T09:21:16+09:00"
     }
   ]
 }
