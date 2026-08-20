@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-19T09:21:16+09:00",
+  "updatedAt": "2026-08-20T09:00:39+09:00",
   "lessons": [
     {
       "day": 1,
@@ -167,6 +167,15 @@
       "path": "day-18.html",
       "kind": "lesson",
       "publishedAt": "2026-08-19T09:21:16+09:00"
+    },
+    {
+      "day": 19,
+      "week": 3,
+      "title": "close, FIN/RST, TIME_WAIT",
+      "summary": "TCP 양방향 종료의 FIN_WAIT·CLOSE_WAIT·LAST_ACK·TIME_WAIT 상태와 FIN/RST의 성공 경계를 sequence로 추적하고, pool·proxy·NAT timeout·port 고갈·graceful drain을 실무적으로 진단합니다.",
+      "path": "day-19.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-20T09:00:39+09:00"
     }
   ]
 }

@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 19</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 3 / DAY 19</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">close, FIN/RST, TIME_WAIT</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">양방향 byte stream을 안전하게 끝내는 상태기계 · 예상 학습 60분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            TCP 종료는 “socket 하나를 닫는다”가 아니라 <strong>두 독립 byte-stream 방향을 FIN으로 각각 닫고 ACK하는 분산 상태 전이</strong>다. FIN은 정상적인 EOF이며 sequence space 1칸을 소비하고, RST는 즉시 connection state를 중단하는 abort다. Active closer의 TIME_WAIT는 마지막 ACK 재전송과 오래된 duplicate segment 격리를 위해 남는다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Full duplex</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">한 TCP connection 안에 client→server와 server→client라는 독립적인 두 byte 방향이 있다는 뜻이다. 한 방향의 EOF가 반대 방향 전송 종료를 강제하지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">FIN</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Finish control bit. FIN sender가 이 방향으로 더 보낼 data가 없음을 알린다. Data가 0 byte여도 sequence space 1을 소비하며 peer는 FIN 다음 번호를 ACK한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">EOF</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">End Of File. Socket read에서 peer의 정상 FIN까지 모든 앞선 byte를 읽은 뒤 “더는 byte가 없다”는 application-visible 결과다. 언어별 API 표현은 빈 byte, 0, null 등 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Half-close</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">한 방향만 종료하고 반대 방향은 유지한 상태. 예를 들어 client가 request body를 모두 보낸 뒤 write 방향을 닫고 server response는 계속 읽을 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">shutdown()</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Socket의 read/write 한쪽 또는 양쪽 동작을 명시적으로 중단하는 API다. File descriptor 참조를 해제하는 <code>close()</code>와 의미가 다르며 runtime별 wrapper를 확인한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">RST</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Reset control bit. 해당 4-tuple의 TCP state가 유효하지 않거나 connection을 abort할 때 사용한다. 정상 EOF가 아니라 error이며 미전달 data가 사라질 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Active closer</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">먼저 FIN을 보내 정상 종료를 시작한 endpoint. 보통 마지막 ACK를 보낸 뒤 TIME_WAIT에 들어가지만 simultaneous close 같은 예외가 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Passive closer</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">먼저 peer FIN을 받은 endpoint. Kernel은 CLOSE_WAIT이 되고 local application이 자기 write 방향을 닫아야 LAST_ACK로 진행한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">TIME_WAIT</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">정상 close의 마지막 ACK를 보낸 endpoint가 일정 시간 4-tuple 관련 state를 유지하는 상태. 마지막 ACK 재전송과 오래된 duplicate segment 혼입 방지가 목적이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">MSL / 2MSL</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Maximum Segment Lifetime은 segment가 network에 존재할 수 있다고 보는 시간 상한 개념이며 TIME_WAIT는 전통적으로 2×MSL을 사용한다. IP TTL 값과 같은 단위가 아니고 실제 duration은 OS 구현에 따라 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">4-tuple</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Source IP·port와 destination IP·port 조합. TCP connection을 구분하는 핵심 주소 상태이며 TIME_WAIT 재사용·ephemeral port 논의는 이 조합 단위로 봐야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SO_LINGER</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Close 시 pending data를 기다릴지와 시간 정책에 관여하는 socket option. 특히 timeout 0의 abortive close는 일부 OS에서 RST를 만들 수 있어 언어·OS별 의미를 검증해야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Idle timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">일정 시간 packet이 없는 connection state를 proxy·LB·NAT·firewall이 제거하는 정책. TCP FIN handshake와 별개이며 양 endpoint가 모르면 stale pooled socket이 생긴다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>운영에서 “connection reset”, “CLOSE_WAIT가 많다”, “TIME_WAIT 때문에 port가 없다”는 말은 자주 나오지만 원인은 서로 다르다. 상태의 owner와 마지막 packet을 모르면 정상적인 cleanup을 장애로 오인하거나 application leak을 kernel tuning으로 숨기게 된다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>CLOSE_WAIT는 local application 책임 신호다.</strong> Peer FIN은 이미 도착했고 kernel이 EOF를 알릴 준비가 됐지만 process가 descriptor를 닫지 않은 상태다.</li>
+            <li><strong>TIME_WAIT는 보통 정상 안전장치다.</strong> 숫자가 많다는 사실만으로 leak가 아니며 active close rate, 4-tuple 다양성, ephemeral range, reuse 정책을 함께 계산한다.</li>
+            <li><strong>RST는 성공 경계를 지운다.</strong> Sender write 성공·TCP ACK·server 처리 완료가 서로 다르므로 reset 시 request side effect가 있었는지 application protocol로 확인해야 한다.</li>
+            <li><strong>Middlebox가 두 connection을 만든다.</strong> L7 proxy가 client FIN을 받고도 backend connection을 pool에 유지할 수 있고, backend RST를 client HTTP error로 변환할 수도 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <p><strong>정상 close 예시:</strong> Client가 먼저 write 방향을 닫는다. Client 마지막 data의 다음 sequence가 5001, server 방향 다음 sequence가 9001이라고 가정한다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:30%;">CLIENT · ACTIVE</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:40%;">PACKET / SEQUENCE</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:30%;">SERVER · PASSIVE</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① ESTABLISHED<br><code>shutdown(SHUT_WR)</code><br>→ FIN_WAIT_1</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#eef2ff;"><strong>FIN+ACK →</strong><br><code>seq=5001, ack=9001</code></td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">ESTABLISHED<br>앞 data까지 수신</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② FIN_WAIT_2<br>response read 가능</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#edf8f2;">← <code>ACK=5002</code><br>FIN 1칸 확인</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff7e6;">CLOSE_WAIT<br>App read는 EOF<br>write는 가능</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ FIN_WAIT_2<br>server reply 수신·ACK</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#eef2ff;">← response data<br><code>seq=9001:9101</code><br><code>ACK=9101 →</code></td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">CLOSE_WAIT<br>App response write</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ FIN_WAIT_2<br>peer FIN 수신</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#eef2ff;">← <strong>FIN+ACK</strong><br><code>seq=9101, ack=5002</code></td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">App <code>close()</code><br>CLOSE_WAIT→LAST_ACK</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff7e6;">⑤ TIME_WAIT<br>2MSL timer</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#edf8f2;"><code>ACK=9102 →</code><br>마지막 ACK</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#edf8f2;">LAST_ACK→CLOSED</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑥ 마지막 ACK 유실 시<br>TIME_WAIT state로 재응답</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;background:#fff1f2;">← FIN 재전송<br>ACK 재전송 →</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">ACK 못 받으면<br>FIN timer/retransmission</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>Client FIN:</strong> FIN은 client 방향 byte stream의 EOF다. <code>seq=5001</code> FIN이 1칸을 쓰므로 server ACK는 5002다.</li>
+            <li><strong>Half-close:</strong> Server kernel은 CLOSE_WAIT로 가고 application read에 EOF를 제공한다. Server→client 방향은 아직 열려 response를 보낼 수 있다.</li>
+            <li><strong>Server FIN:</strong> Server application이 response를 마치고 close해야 LAST_ACK로 간다. CLOSE_WAIT가 오래 남으면 이 local lifecycle이 지연된 것이다.</li>
+            <li><strong>TIME_WAIT:</strong> Client가 server FIN의 마지막 ACK를 소유한다. ACK가 유실되면 retransmitted FIN에 다시 ACK할 state가 필요하다.</li>
+            <li><strong>Old duplicate 격리:</strong> 같은 4-tuple이 너무 빨리 새 connection에 재사용되면 이전 incarnation의 늦은 segment가 새 sequence space와 충돌할 위험이 있다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>성공 경계:</strong> FIN에 대한 ACK는 FIN과 그 앞의 byte를 peer TCP가 수신했다는 뜻이다. Peer application이 모두 읽고 처리·commit했다는 뜻은 아니다. RST 수신은 connection state가 중단됐다는 뜻이며 어떤 request side effect가 완료됐는지는 application idempotency key·transaction status로 확인해야 한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">정상 종료 상태기계</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:28%;">상태</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">누가 왜 소유하는가</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">FIN_WAIT_1</td><td style="padding:9px;border:1px solid #dbe3e8;">Active closer가 FIN을 보냈지만 그 FIN의 ACK를 아직 못 받았다. FIN retransmission과 ACK를 기다린다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">FIN_WAIT_2</td><td style="padding:9px;border:1px solid #dbe3e8;">자기 FIN은 ACK됐고 peer FIN을 기다린다. Peer application이 반대 방향을 닫지 않으면 오래 머물 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">CLOSE_WAIT</td><td style="padding:9px;border:1px solid #dbe3e8;">Passive closer가 peer FIN을 ACK한 뒤 local application close를 기다린다. Kernel이 임의로 application lifecycle을 완료할 수 없다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">LAST_ACK</td><td style="padding:9px;border:1px solid #dbe3e8;">Passive closer도 FIN을 보냈고 마지막 ACK를 기다린다. ACK가 오면 CLOSED다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">CLOSING</td><td style="padding:9px;border:1px solid #dbe3e8;">양쪽 FIN이 교차했지만 자기 FIN ACK가 아직인 simultaneous close 경로다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">TIME_WAIT</td><td style="padding:9px;border:1px solid #dbe3e8;">마지막 ACK를 보낸 쪽이 retransmitted FIN에 응답하고 old duplicate가 사라질 시간을 보장한다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">close()와 shutdown()의 차이</h3>
+          <p><code>shutdown(SHUT_WR)</code>은 write 방향에 EOF를 보내면서 read 방향을 유지하는 protocol action이다. <code>close()</code>는 process의 file descriptor reference를 해제하는 API다. 다른 thread/process가 duplicate descriptor를 갖거나 runtime이 buffering하면 마지막 reference가 사라지는 시점과 FIN 전송 시점이 다를 수 있다. Close가 반환했다고 wire의 4-way exchange와 TIME_WAIT가 모두 끝났다는 뜻도 아니다.</p>
+          <p>정상 close는 pending send data를 전달하려 시도하지만 process crash, abort, timeout, <code>SO_LINGER</code> 설정은 동작을 바꿀 수 있다. 특히 linger 0으로 RST를 강제하는 패턴은 상대에게 EOF 대신 error를 주고 unread/pending data를 잃게 할 수 있으므로 protocol 요구사항과 OS 실측 없이 사용하지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">RST가 만들어지는 대표 경계</h3>
+          <ul style="padding-left:22px;">
+            <li><strong>Closed port:</strong> LISTEN state가 없는 destination port로 SYN이 오면 destination stack 또는 middlebox가 RST를 보낼 수 있다.</li>
+            <li><strong>존재하지 않는 connection:</strong> Host가 모르는 4-tuple의 segment를 받거나 state가 이미 제거된 뒤 packet이 오면 reset될 수 있다.</li>
+            <li><strong>Abortive close:</strong> Application/OS 정책이 pending data를 버리고 즉시 중단하도록 선택하면 RST가 나갈 수 있다.</li>
+            <li><strong>Unread data와 close:</strong> Receiver application이 unread data를 남긴 채 닫을 때 OS 동작이 reset으로 보일 수 있으므로 runtime·kernel을 확인한다.</li>
+            <li><strong>Proxy/LB:</strong> Idle timeout, backend reset, protocol error를 front-side RST로 변환할 수 있다. IP source와 TTL, 양쪽 capture로 owner를 특정한다.</li>
+          </ul>
+          <p>Reset spoofing은 live connection을 강제 종료할 수 있는 보안 위험이다. Modern TCP는 sequence/window 검증과 challenge ACK 같은 방어를 사용하지만 RFC 9293과 RFC 5961 적용 범위, kernel version, middlebox 동작을 함께 확인한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">TIME_WAIT의 2MSL과 assassination 위험</h3>
+          <p>마지막 ACK가 유실되면 passive closer는 FIN을 재전송한다. Active closer가 즉시 state를 버리면 이 FIN에 ACK하지 못하거나 RST로 응답해 종료를 깨뜨릴 수 있다. 또한 network에 남은 old duplicate가 같은 4-tuple의 새 connection으로 들어갈 수 있다. RFC 1337은 TIME-WAIT를 예상치 못한 RST로 조기에 제거하는 위험을 분석한다.</p>
+          <p>TIME_WAIT duration, timestamp 기반 재사용, port 선택은 OS별 구현이다. RFC 6191은 timestamps와 sequence 정보를 이용한 안전한 축소 조건을 논의하지만 “TIME_WAIT를 전부 없애도 된다”는 뜻이 아니다. Production에서 임의 sysctl을 복사하기 전에 NAT, load balancer, clock/timestamp, old segment 위험과 rollback을 검증한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Port 고갈을 숫자로 분리하기</h3>
+          <p>Client가 하나의 source IP에서 동일 destination IP:port로 초당 2,000개 새 connection을 active close하고 TIME_WAIT를 60초 유지한다고 가정하면 steady-state 약 120,000개가 필요하다. 한 source IP의 ephemeral port 범위보다 크면 동일 destination에 새 4-tuple을 만들기 어렵다. 그러나 여러 destination·source IP는 다른 tuple 공간을 가지므로 <strong>TIME_WAIT 총계만으로 고갈을 단정하지 않는다.</strong></p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">관측</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">먼저 분리할 것</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">TIME_WAIT 많음</td><td style="padding:9px;border:1px solid #dbe3e8;">Active close rate, 동일 destination tuple, ephemeral range, source IP 수, connection reuse.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">CLOSE_WAIT 많음</td><td style="padding:9px;border:1px solid #dbe3e8;">Local process·fd owner, EOF 처리, exception path, thread/connection-pool leak.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">FIN_WAIT_2 많음</td><td style="padding:9px;border:1px solid #dbe3e8;">Peer가 FIN을 안 보내는지, half-close protocol인지, process orphan/timeout 정책.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">RST 증가</td><td style="padding:9px;border:1px solid #dbe3e8;">RST source, seq/ack validity, LB/NAT idle timeout, deploy/crash, unread/pending data.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Protocol EOF</td><td style="padding:9px;border:1px solid #dbe3e8;">Message length, framing, content-length, half-close 중 무엇이 request 완료를 뜻하는지 명시한다. “Connection이 닫힐 때까지 읽기”는 pooling/keep-alive와 충돌할 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Close owner</td><td style="padding:9px;border:1px solid #dbe3e8;">Client/server/proxy 중 누가 active close할지, drain 시 누가 FIN을 시작할지 문서화한다. TIME_WAIT placement와 source port budget에 직접 영향을 준다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Pool lifecycle</td><td style="padding:9px;border:1px solid #dbe3e8;">Bounded pool에 idle timeout, max-age, validation, endpoint drain을 둔다. LB/NAT idle timeout보다 pool reuse 간격이 길면 stale socket의 첫 request가 RST를 받을 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Graceful shutdown</td><td style="padding:9px;border:1px solid #dbe3e8;">Readiness 제거→신규 traffic 차단→in-flight deadline 내 drain→write half-close/response 완료→강제 종료 순서를 둔다. 즉시 process kill은 reset·retry storm을 만든다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Error handling</td><td style="padding:9px;border:1px solid #dbe3e8;">EOF, timeout, reset, broken pipe를 구분해 retry eligibility를 결정한다. Side effect 가능 request는 idempotency key와 status query 없이 자동 retry하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">State별 socket 수·age, active/passive close rate, RST source, port allocation failure, pool stale reuse, LB/NAT timeout, deploy timeline을 같은 4-tuple·timestamp로 연결한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Capacity</td><td style="padding:9px;border:1px solid #dbe3e8;">새 connection rate×TIME_WAIT duration과 destination별 tuple을 계산한다. 우선 reuse/pooling, source IP sharding, destination 분산을 검토하고 sysctl 단축은 마지막에 canary한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Security</td><td style="padding:9px;border:1px solid #dbe3e8;">RST 검증, connection rate limit, idle timeout, TLS close semantics를 계층화한다. Packet capture에는 tuple·payload·token이 노출될 수 있어 최소 범위·보관 기간을 적용한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border:1px solid #f0cf88;padding:14px 16px;"><strong>Anti-pattern:</strong> TIME_WAIT를 보자마자 전역 timeout을 0으로 만들거나, CLOSE_WAIT를 kernel 문제로 보거나, 모든 reset을 network 장애로 retry하거나, graceful drain 없이 pod/process를 동시에 종료하지 않는다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> 배포 직후 client에서 connection reset이 증가하고 server에는 CLOSE_WAIT 수천 개가 남았다. 일부 결제 request는 결과를 알 수 없어 retry가 시작됐다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:23%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>증상</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Client/server/proxy별 reset·EOF·timeout 비율, TCP state count와 age, endpoint·AZ·version·request method/idempotency별 발생 시각을 분리한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>먼저 수집할 증거/지표</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">양 끝·proxy pcap의 FIN/RST seq/ack/timestamp·source, <code>ss -tanopi</code> state/age/process, fd/thread dump, pool metrics, deploy/drain log, LB/NAT idle timeout·flow log, application transaction/idempotency 상태를 변경 전에 저장한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>가능한 가설</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Server EOF exception path가 close 누락, immediate process kill, abortive SO_LINGER, unread request body, LB idle timeout과 pool mismatch, backend crash, NAT state expiry, forged/invalid RST, port pressure를 병렬로 세운다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>안전한 첫 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">자동 retry를 idempotent request와 budget 안으로 제한하고 문제 version 신규 traffic을 drain한다. Close leak process를 소량 격리하며 transaction status API로 결과 불명확 request를 먼저 판별한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>Rollback/복구</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">최근 shutdown/pool/linger/LB timeout 변경을 known-good으로 원복하고 readiness drain을 적용한다. CLOSE_WAIT age 감소→FIN handshake 회복→RST 감소→pool 회수→request SLO·transaction 일관성 순서로 확인한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>하지 말아야 할 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">모든 socket 강제 kill, TIME_WAIT 전역 제거, reset request 무제한 retry, 증거 전 전 pod 동시 restart, firewall 전체 해제, ACK만 보고 결제 미처리 단정, 한쪽 pcap만으로 RST owner 확정을 하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: graceful FIN과 abortive RST 비교</h2>
+          <p><strong>목표:</strong> 격리된 Docker network에서 client가 half-close한 정상 종료와 server가 linger 0으로 abort한 reset을 각각 capture해 FIN sequence, EOF, TIME_WAIT, RST error를 비교한다.</p>
+          <p><strong>사전 조건:</strong> Docker Desktop, 이 저장소, 터미널 3개. 임시 listener는 lab container의 9002/9003만 사용한다. 실행 전 packet 순서와 어느 endpoint가 TIME_WAIT에 들어갈지 예측한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 예측 (3분)</h3>
+          <ol style="padding-left:22px;">
+            <li>Client가 request 뒤 <code>shutdown(SHUT_WR)</code>하면 server는 EOF 후 response를 보낼 수 있을까?</li>
+            <li>Client FIN seq가 X면 server ACK는 얼마인가?</li>
+            <li>Server가 linger 0으로 닫으면 client read는 빈 byte EOF와 reset 중 무엇을 볼까?</li>
+          </ol>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · Graceful half-close (14분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">make up</div>
+          <p><strong>터미널 A · server:</strong> Client EOF까지 읽고 reply를 보낸 뒤 자기 write 방향을 닫는다.</p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec api python3 -u -c 'import socket; s=socket.socket(); s.bind(("0.0.0.0",9002)); s.listen(1); c,a=s.accept(); b=b"".join(iter(lambda:c.recv(4096),b"")); print("request",b); c.sendall(b"reply\n"); c.shutdown(socket.SHUT_WR); c.close()'
+          </div>
+          <p><strong>터미널 B · capture:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client tcpdump -ni eth0 -tttt -nn -S -c 20 'host 172.28.0.20 and tcp port 9002'
+          </div>
+          <p><strong>터미널 C · client:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client python3 -u -c 'import socket,time; s=socket.create_connection(("172.28.0.20",9002)); s.sendall(b"hello\n"); s.shutdown(socket.SHUT_WR); print("reply",s.recv(4096)); print("eof",s.recv(1)); s.close(); time.sleep(2)'<br>
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client ss -tanopi 'dport = :9002'
+          </div>
+          <p><strong>예상 관찰:</strong> Client data 뒤 FIN, server ACK, server reply와 FIN, client 마지막 ACK가 보인다. Client가 먼저 FIN을 보낸 active closer이므로 종료 직후 TIME_WAIT가 보일 수 있다. FIN absolute seq와 ACK가 +1인지 계산한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · 실패 주입: abortive RST (11분)</h3>
+          <p><strong>터미널 A · reset server:</strong> Accept 직후 Linux lab socket에 linger 0을 설정하고 close한다.</p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec api python3 -u -c 'import socket,struct,time; s=socket.socket(); s.bind(("0.0.0.0",9003)); s.listen(1); c,a=s.accept(); c.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack("ii",1,0)); c.close(); time.sleep(1)'
+          </div>
+          <p><strong>터미널 B:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client tcpdump -ni eth0 -tttt -nn -S -c 10 'host 172.28.0.20 and tcp port 9003'
+          </div>
+          <p><strong>터미널 C:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">
+            docker compose -f labs/basic-network-observability/docker-compose.yml exec client python3 -u -c 'import socket,time; s=socket.create_connection(("172.28.0.20",9003)); s.sendall(b"will-it-commit?\n"); time.sleep(0.5); print(s.recv(1))'
+          </div>
+          <p><strong>예상 관찰:</strong> Client는 정상 EOF 대신 <code>ConnectionResetError</code> 계열 error를 보고 capture에는 server source의 RST가 보인다. Client <code>sendall()</code> 성공만으로 server application 처리 여부를 판단할 수 없다는 failure window를 설명한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오류 해결과 cleanup (7분)</h3>
+          <ul style="padding-left:22px;">
+            <li><code>Address already in use</code>면 <code>ss -lntp 'sport = :9002 or sport = :9003'</code>로 lab listener를 확인한다.</li>
+            <li>TIME_WAIT가 안 보이면 관측 시점·filter와 실제 active closer를 확인한다. State duration은 OS 구현에 따라 다르다.</li>
+            <li>RST client가 <code>BrokenPipeError</code>를 내면 reset timing이 write에 먼저 드러난 것이다. Capture의 RST timestamp로 같은 원인을 확인한다.</li>
+            <li><code>struct.pack("ii",1,0)</code>은 이 Linux container 실습용이다. 다른 OS·언어에 그대로 복사하지 않는다.</li>
+            <li>Capture checksum incorrect는 offload artifact일 수 있으므로 state/상대 수신과 함께 본다.</li>
+          </ul>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">make down</div>
+          <p><strong>Cleanup 확인:</strong> Lab container/network가 내려가고 9002/9003 listener가 남지 않았는지 확인한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>FIN은 connection 전체가 아니라 한 방향을 닫는다.</strong> Peer는 CLOSE_WAIT에서 여전히 data를 보낼 수 있다.</li>
+            <li><strong>FIN도 sequence 1을 소비한다.</strong> Payload 0만 보고 ACK number가 그대로라고 계산하지 않는다.</li>
+            <li><strong>ACK를 application 완료로 해석하지 않는다.</strong> TCP receive와 business commit은 다른 owner·state다.</li>
+            <li><strong>RST를 정상 EOF로 처리하지 않는다.</strong> Pending/unread data와 transaction 결과가 불명확할 수 있다.</li>
+            <li><strong>CLOSE_WAIT와 TIME_WAIT를 같은 leak로 묶지 않는다.</strong> 전자는 local app close 지연, 후자는 보통 active close 안전 state다.</li>
+            <li><strong>TIME_WAIT duration을 IP TTL로 계산하지 않는다.</strong> MSL은 별도 protocol 시간 개념이고 exact 값은 OS마다 다르다.</li>
+            <li><strong>총 TIME_WAIT 수만으로 ephemeral port 고갈을 단정하지 않는다.</strong> 동일 destination·source IP의 4-tuple 공간과 실제 allocation error를 본다.</li>
+            <li><strong>Proxy가 있으면 FIN/RST owner가 둘 이상이다.</strong> Front/back connection을 각각 capture한다.</li>
+            <li><strong>Idle timeout을 TCP 정상 종료로 가정하지 않는다.</strong> Middlebox state만 사라져 endpoint는 ESTABLISHED로 믿는 half-open 상태가 생길 수 있다.</li>
+            <li><strong>SO_LINGER=0을 빠른 cleanup 최적화로 남용하지 않는다.</strong> RST, data loss, retry/중복 side effect 비용을 낳는다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“Client가 먼저 close하는 정상 TCP 종료를 sequence와 state로 설명하세요.”</strong><br>좋은 답변 구조: full-duplex 전제 → FIN seq=x·ACK=x+1 → FIN_WAIT_1/2와 CLOSE_WAIT → peer data 가능 → peer FIN y·ACK y+1 → LAST_ACK/CLOSED → active closer TIME_WAIT → 마지막 ACK 유실·old duplicate 이유.</li>
+            <li><strong>“CLOSE_WAIT 5만 개와 TIME_WAIT 5만 개는 각각 무엇을 의미합니까?”</strong><br>좋은 답변 구조: state owner 분리 → CLOSE_WAIT peer FIN 수신/local app 미close → fd/thread/EOF path → TIME_WAIT active close rate·2MSL → tuple/port 계산 → 정상 vs leak 증거 → safe drain/rollback.</li>
+            <li><strong>“결제 POST 후 RST가 왔습니다. Retry해도 됩니까?”</strong><br>좋은 답변 구조: write/ACK/response/commit failure window → RST source·timestamp → 결과 불명확 → idempotency key·dedup·status query → bounded retry budget → proxy/LB 두 connection → 중복 side effect와 대안.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>cwnd=64KB, rwnd=256KB, FlightSize=48KB일 때 단순화한 추가 전송량은?</li>
+            <li>Slow start와 Reno congestion avoidance의 RTT별 성장 차이는?</li>
+            <li>세 duplicate ACK와 RTO가 다른 강도로 cwnd를 줄이는 이유는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 16KB. ② Slow start는 이상적으로 대략 두 배, avoidance는 대략 1 SMSS 증가다. ③ Duplicate ACK는 뒤 packet과 ACK clock이 살아 있다는 증거지만 RTO는 feedback 단절이라 더 보수적으로 재시작한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>FIN <code>seq=7001</code>을 정상 수신한 peer의 ACK는 얼마이며 왜 그런가?</li>
+            <li>CLOSE_WAIT의 state owner와 다음 전이를 만드는 주체는 누구인가?</li>
+            <li>초당 2,000 active close, TIME_WAIT 60초라면 steady-state 수는? 이것만으로 port 고갈을 확정할 수 있는가?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① <code>ACK=7002</code>, FIN이 sequence 1을 소비한다. ② Peer FIN을 받은 local kernel이 state를 소유하지만 local application이 close/shutdown해야 FIN을 보내 LAST_ACK로 간다. ③ 약 120,000개이며 동일 destination·source IP, ephemeral range, tuple reuse와 실제 allocation failure 없이는 고갈을 확정할 수 없다. 문항당 수치/정의 1점, owner·state 1점, 장애·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9293.html" style="color:#0369a1;">RFC 9293 · 현재 TCP 기본 규격, closing state와 FIN/RST 처리</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc1337.html" style="color:#0369a1;">RFC 1337 · TIME-WAIT assassination 위험</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc5961.html" style="color:#0369a1;">RFC 5961 · Blind reset 공격에 대한 TCP robustness 개선</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc6191.html" style="color:#0369a1;">RFC 6191 · TCP timestamp를 이용한 TIME-WAIT 축소 조건</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 20</strong><br>
+            <span>통합 랩: loss/delay와 socket state 관찰 — SYN부터 retransmission, rwnd/cwnd, FIN/RST/TIME_WAIT까지 하나의 5-tuple timeline으로 진단하고 안전하게 복구합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
