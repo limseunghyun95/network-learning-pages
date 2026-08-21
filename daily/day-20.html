@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 20</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">COMPUTER NETWORKING · WEEK 3 / DAY 20 · INTEGRATION LAB</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">랩: loss/delay와 socket state 관찰</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">Packet 한 장면을 kernel state·timer·application 결과까지 연결하기 · 개념 25분 + 실습 40분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Loss와 delay는 같은 “느림”이 아니다. Delay는 RTT와 queue 체류시간을 늘리고, loss는 sequence gap·duplicate ACK·SACK 또는 RTO를 통해 retransmission과 congestion response를 만든다. 오늘은 <strong>같은 5-tuple을 tcpdump timestamp, ss의 socket state/TCP_INFO, curl phase timing으로 조인</strong>해 원인과 결과를 증명한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Loss</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Packet이 sender에서 receiver까지 도달하지 못한 사건. Link congestion, queue drop, firewall, NIC·driver 오류 등 원인은 다르며 TCP는 직접 원인을 보지 못하고 ACK와 timer로 추론한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Delay / Latency</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Packet이 한 지점에서 다른 지점까지 가는 시간. Propagation·serialization·processing·queueing delay의 합이며, RTT는 왕복 관찰값이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Jitter</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Delay가 시간에 따라 흔들리는 정도. 평균 RTT가 같아도 jitter가 크면 RTO 추정과 tail latency가 불안정해진다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">qdisc</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Queueing discipline. Linux interface egress packet의 대기·스케줄·drop 정책을 소유하는 kernel 객체다. <code>tc</code>로 조회·변경한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">netem</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Network emulator. qdisc에 delay, loss, duplicate, reorder 등을 주입한다. 오늘은 client의 <code>eth0</code> egress에만 적용하므로 비대칭임을 기억한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">5-tuple</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Protocol, source IP·port, destination IP·port 조합. Packet과 socket을 같은 flow로 연결하는 join key다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">RTO</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Retransmission Timeout. ACK가 오지 않을 때 sender가 손실로 판단하는 timer. SRTT와 RTT variation에서 계산되며 timeout이면 ACK clock이 끊겼다고 보고 보수적으로 반응한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SACK</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Selective Acknowledgment. Receiver가 연속 ACK 바깥에 이미 받은 byte block을 알려 sender가 빠진 구간을 더 정확히 재전송하도록 돕는 TCP option이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Retransmission</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">ACK되지 않은 sequence range를 다시 보내는 동작. Capture에 같은 sequence가 다시 보인다는 것은 결과이지, 처음 packet이 어느 hop에서 사라졌는지는 양쪽 증거가 더 필요하다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">TCP_INFO</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Kernel이 socket별 RTT, retransmission, congestion window 등 내부 상태 일부를 application/tool에 노출하는 인터페이스. Linux <code>ss -ti</code>가 이를 읽어 보여준다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Control path / Data path</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Control path는 route·qdisc·socket option 같은 정책을 설치하고, data path는 실제 packet을 처리한다. <code>tc qdisc add</code>는 control path, 이후 packet delay/drop은 data path다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Monotonic clock</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">시스템 시각 보정과 무관하게 앞으로 가는 elapsed-time용 clock. Host가 다른 capture를 조인할 때 wall clock offset이 있으면 순서가 뒤집힐 수 있어 clock source를 기록한다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>“Network가 느리다”는 증상은 원인이 아니다. Application queue, DNS, connect, RTT, packet loss, receiver backpressure, server 처리 중 어디서 시간이 소비됐는지를 분해해야 안전한 조치를 선택할 수 있다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Delay만 있으면 ACK도 늦어진다.</strong> Sender의 in-flight byte와 request latency가 늘지만 packet이 사라진 것은 아니다. Timeout을 delay보다 짧게 두면 정상 응답을 client가 먼저 포기한다.</li>
+            <li><strong>Loss가 있으면 feedback loop가 바뀐다.</strong> Sequence hole은 duplicate ACK/SACK 또는 RTO를 만들고, retransmission과 cwnd 감소로 이어져 application latency가 비선형적으로 증가할 수 있다.</li>
+            <li><strong>관측 위치가 결론을 제한한다.</strong> Client capture에서 outgoing packet이 보인다는 것은 NIC 밖의 모든 hop 전달을 증명하지 않는다. Server capture와 조인해야 loss 구간을 좁힌다.</li>
+            <li><strong>Socket state는 원인과 결과를 섞는다.</strong> ESTABLISHED가 application healthy를 뜻하지 않고, TIME_WAIT가 장애를 뜻하지 않는다. Age·queue·timer·process owner를 같이 본다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">관측 지점</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:52%;">DATA PATH</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">상태 owner</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① curl<br>phase time</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">client process → socket send queue</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">Process/runtime</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② ss -tin<br>qdisc stats</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">TCP state·cwnd/rwnd/RTO → <strong>netem delay/loss</strong></td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">Client kernel</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ tcpdump<br>seq/ack/time</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">veth → Docker bridge → server veth</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">Network namespace</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ server log<br>socket state</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">server receive queue → API process → response</td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">Server kernel/app</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ join</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;"><strong>5-tuple + sequence range + timestamp</strong></td><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">Investigator</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>t0 baseline:</strong> DNS answer, route, qdisc, socket count를 먼저 저장한다. 변경 전 기준선이 없으면 주입 효과와 기존 문제를 구분하지 못한다.</li>
+            <li><strong>t1 connect:</strong> SYN retransmission은 data loss와 다른 초기 state다. <code>curl</code>의 <code>time_connect</code>와 SYN/SYN-ACK timestamp를 연결한다.</li>
+            <li><strong>t2 transfer:</strong> Sequence gap 뒤 같은 ACK number가 반복되고 SACK block이 보이면 receiver가 뒤 byte를 받았지만 앞 hole을 기다리는 상황일 수 있다.</li>
+            <li><strong>t3 kernel response:</strong> Fast retransmit 또는 RTO가 발생하면 retransmission count와 cwnd/RTO가 변한다. Exact algorithm과 필드 이름은 kernel/version에 따라 다르다.</li>
+            <li><strong>t4 application:</strong> TCP recovery가 성공해도 client deadline이 먼저 끝나면 application은 실패다. 반대로 HTTP 200은 해당 request가 응답됐다는 L7 증거다.</li>
+            <li><strong>t5 close:</strong> FIN/RST와 TIME_WAIT까지 보아 connection의 종료 owner와 cleanup을 확인한다. Capture를 response에서 끊으면 중요한 failure window를 놓친다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>불변식:</strong> ACK number는 receiver가 다음에 기대하는 byte를 뜻한다. Packet loss가 있어도 이미 연속 수신된 prefix의 ACK는 뒤로 가지 않는다. <strong>성공 확정:</strong> TCP ACK는 peer kernel receive를, HTTP response는 application protocol 결과를 말할 뿐 business transaction commit은 별도 상태다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Delay가 timer와 window에 미치는 영향</h3>
+          <p>RTT가 커지면 같은 throughput을 유지하기 위해 필요한 in-flight data, 즉 대략적인 bandwidth-delay product가 커진다. 100Mbps path와 RTT 100ms라면 약 1.25MB가 flight에 있어야 link를 채울 수 있다. Sender는 <code>min(cwnd, rwnd)</code> 범위에서만 보낼 수 있으므로 둘 중 하나가 작으면 bandwidth가 남아도 throughput이 제한된다.</p>
+          <p>RTO는 단일 RTT가 아니라 smoothed RTT와 variation을 사용한다. Delay/jitter가 커질 때 RTO가 적응하기 전에 지나치게 짧은 application timeout이 먼저 만료될 수 있다. 반대로 timeout을 무작정 늘리면 queue와 동시 in-flight request가 쌓여 overload 복구가 느려진다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Loss detection: duplicate ACK/SACK와 RTO</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:28%;">경로</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">증거·비용·한계</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Duplicate ACK</td><td style="padding:9px;border:1px solid #dbe3e8;">뒤 segment가 도착해 ACK clock이 살아 있다는 증거다. 충분한 후속 data가 없거나 ACK 자체가 손실되면 fast path가 열리지 않을 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">SACK</td><td style="padding:9px;border:1px solid #dbe3e8;">Receiver가 받은 비연속 block을 알려 여러 hole 복구를 돕는다. SYN에서 option이 협상됐는지 capture로 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">RTO</td><td style="padding:9px;border:1px solid #dbe3e8;">ACK feedback이 충분하지 않을 때 timer로 복구한다. 최소 한 timer를 기다려 tail latency가 크게 늘고 congestion state도 더 보수적으로 바뀐다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">한쪽 capture로 loss 위치를 확정할 수 없는 이유</h3>
+          <p>Client capture에 seq 1000:2448가 있고 server capture에 없으면 두 capture 지점 사이에서 사라졌다는 범위만 말할 수 있다. Client capture에도 없다면 application write, kernel queue, capture filter/offload를 먼저 본다. 양쪽에 있는데 ACK가 client에 없다면 reverse path 또는 receiver processing을 조사한다. NAT/LB가 connection을 terminate하면 앞·뒤 5-tuple과 sequence space가 달라지므로 trace ID와 proxy log로 다시 조인한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Queue와 coordinated omission</h3>
+          <p>qdisc delay는 packet을 queue에 머물게 한다. Send queue가 쌓이거나 application pool이 대기하면 “network RTT” 밖에서도 latency가 늘어난다. Load generator가 이전 응답을 기다린 뒤 다음 요청을 보내면 장애 동안 보내지 못한 요청을 표본에서 누락하는 coordinated omission이 생긴다. 실무 부하는 arrival schedule과 response latency를 분리해 측정한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Baseline first</td><td style="padding:9px;border:1px solid #dbe3e8;">주입 전후에 동일 요청·동일 capture filter·동일 관측 명령을 쓴다. 변경 변수는 한 번에 하나로 제한한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Symmetry 명시</td><td style="padding:9px;border:1px solid #dbe3e8;">Netem이 ingress인지 egress인지, 어느 namespace/interface인지 기록한다. Client egress loss는 request와 ACK에 영향을 주지만 server response data 자체는 직접 drop하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Evidence join</td><td style="padding:9px;border:1px solid #dbe3e8;">5-tuple, sequence range, monotonic/wall timestamp, request ID를 함께 남긴다. NAT/proxy 경계에서는 tuple mapping과 양쪽 connection을 별도로 저장한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Timeout budget</td><td style="padding:9px;border:1px solid #dbe3e8;">DNS/connect/TLS/request 각 phase와 전체 deadline을 분리하고 upstream보다 downstream budget을 짧게 둔다. Retry는 남은 deadline과 idempotency 안에서만 한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Capture scope</td><td style="padding:9px;border:1px solid #dbe3e8;">필요 interface·host·port·시간만 capture하고 payload/credential을 최소화한다. Full snaplen 파일은 접근권한·보관기간을 정한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Change safety</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>tc qdisc show</code>로 기존 policy를 저장하고 canary namespace에만 주입한다. 종료·오류 trap과 명시적 cleanup을 준비한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Version caveat</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>ss</code> 필드, congestion control, retransmission 표시, offload는 kernel/iproute2 버전에 따라 다르다. 이름 하나보다 packet sequence와 application outcome을 우선한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border:1px solid #f0cf88;padding:14px 16px;"><strong>Anti-pattern:</strong> Production interface에 광범위한 loss를 바로 주입하거나, 평균 RTT 하나만 보고 정상 판정하거나, client capture의 retransmission만으로 ISP를 지목하거나, 모든 timeout 요청을 즉시 retry하지 않는다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> 배포 후 p99가 200ms에서 4초로 뛰고 일부 request가 timeout이다. TCP retransmission 지표도 증가했지만 server CPU는 정상이다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:23%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>증상</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Endpoint·AZ·source/destination·version별 latency/timeout/error를 분리하고 DNS/connect/TLS/TTFB/total phase를 비교한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>먼저 수집할 증거/지표</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">양 끝 packet timestamp·seq/ack/SACK/RST, <code>ss -tinm</code>의 RTT/RTO/retrans/cwnd/rwnd/send·recv queue, qdisc/NIC drop, route/MTU, LB flow log, app queue와 deploy timeline을 변경 전에 수집한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>가능한 가설</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Forward/reverse path loss, queueing, MTU black hole, receiver zero window, LB/NAT idle expiry, host NIC saturation, application pause, timeout budget 축소, retry amplification을 분리한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>안전한 첫 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">문제 AZ/version 신규 traffic을 소량 drain하고 retry를 idempotent·bounded budget으로 제한한다. Capture와 metrics를 보존하며 canary path로 우회한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>Rollback/복구</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">최근 route/qdisc/MTU/LB/timeout 변경을 known-good으로 원복한다. Loss→retrans→RTT/RTO→queue→p99→error rate 순서로 회복을 확인하고 주입 policy를 제거한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>하지 말아야 할 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">증거 전 전체 restart, timeout 무제한 확대, 전 요청 즉시 retry, congestion control 전역 변경, firewall 전체 해제, 한쪽 pcap만으로 loss hop 확정, cleanup 없는 <code>tc</code> 변경을 하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 40분 실습: baseline → delay → loss → cleanup</h2>
+          <p><strong>목표:</strong> 격리된 Docker lab의 client egress에만 netem을 적용하고, 동일 요청에서 curl phase·tcpdump·ss·qdisc를 조인해 delay와 loss의 서로 다른 증거를 설명한다.</p>
+          <p><strong>사전 조건:</strong> Docker Desktop, 저장소 루트, 터미널 3개. 이 실습은 <code>client</code> container의 <code>eth0</code>만 변경한다. 실행 전 아래 네 가지를 종이에 예측한다: baseline RTT, 80ms egress delay 후 왕복 증가량, 5% random loss에서 모든 요청이 실패하지 않는 이유, cleanup 후 회복 기준.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 기준선 (8분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">make up<br>docker compose -f labs/basic-network-observability/docker-compose.yml exec client sh -lc 'ip route; tc qdisc show dev eth0; curl -sS -o /dev/null -w "dns=%{time_namelookup} connect=%{time_connect} start=%{time_starttransfer} total=%{time_total}\n" http://api.lab:8000/headers'</div>
+          <p><strong>예상 관찰:</strong> Docker bridge 안의 baseline connect/total은 작고 <code>qdisc</code>에는 netem이 없다. 정확한 수치는 환경에 따라 달라지므로 자기 baseline을 비교 기준으로 쓴다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · 80ms delay 주입과 socket state (10분)</h3>
+          <p><strong>터미널 A · capture:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">docker compose -f labs/basic-network-observability/docker-compose.yml exec client tcpdump -ni eth0 -tttt -nn -S -c 30 'host 172.28.0.20 and tcp port 8000'</div>
+          <p><strong>터미널 B · control path와 요청:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">docker compose -f labs/basic-network-observability/docker-compose.yml exec client tc qdisc replace dev eth0 root netem delay 80ms 10ms distribution normal<br>docker compose -f labs/basic-network-observability/docker-compose.yml exec client sh -lc 'tc -s qdisc show dev eth0; curl -sS -o /dev/null -w "connect=%{time_connect} start=%{time_starttransfer} total=%{time_total}\n" "http://api.lab:8000/slow?seconds=5"'</div>
+          <p><strong>터미널 C · curl 실행 중:</strong></p>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">docker compose -f labs/basic-network-observability/docker-compose.yml exec client ss -tinm 'dst 172.28.0.20 and dport = :8000'</div>
+          <p><strong>예상 관찰:</strong> Client egress SYN·ACK·request가 각각 약 80ms+jitter 지연된다. Reverse response data는 netem을 직접 통과하지 않지만 client ACK는 지연되므로 완전히 대칭인 160ms 고정 모델로 단정하지 않는다. <code>ss</code>에서 ESTAB, RTT/RTO, cwnd와 queue를 기록한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · 5% loss 주입과 재전송 찾기 (13분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">docker compose -f labs/basic-network-observability/docker-compose.yml exec client tc qdisc replace dev eth0 root netem delay 80ms 10ms loss 5%<br>docker compose -f labs/basic-network-observability/docker-compose.yml exec client sh -lc 'for i in $(seq 1 20); do curl --connect-timeout 2 --max-time 4 -sS -o /dev/null -w "run=$i code=%{http_code} connect=%{time_connect} total=%{time_total}\n" http://api.lab:8000/headers || echo "run=$i curl_error=$?"; done'<br>docker compose -f labs/basic-network-observability/docker-compose.yml exec client tc -s qdisc show dev eth0</div>
+          <p><strong>Capture 읽기:</strong> 같은 sequence range 재등장, ACK number 반복, SACK option, SYN 재전송, FIN/RST를 구분한다. Random 5%는 정확히 20개 중 1개 request 실패를 보장하지 않는다. Packet 단위 확률이고 TCP가 일부 손실을 복구하므로 HTTP 성공이어도 total time과 retransmission은 늘 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입을 deadline과 연결 (5분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">docker compose -f labs/basic-network-observability/docker-compose.yml exec client curl --connect-timeout 0.05 --max-time 0.15 -v http://api.lab:8000/headers</div>
+          <p><strong>예상 관찰:</strong> TCP가 결국 복구할 수 있어도 application deadline이 먼저 만료될 수 있다. Error가 connect timeout인지 total timeout인지 curl trace와 SYN/ACK timeline으로 판정한다. 이 요청의 side effect가 있는 경우 무조건 retry하면 안 된다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오류 해결과 cleanup (4분)</h3>
+          <ul style="padding-left:22px;">
+            <li><code>Operation not permitted</code>면 compose의 client <code>NET_ADMIN</code> capability와 올바른 container를 확인한다.</li>
+            <li><code>Specified qdisc not found</code>면 image의 iproute2/netem 지원과 <code>tc qdisc show</code>를 확인한다.</li>
+            <li>재전송이 안 보이면 확률 결과일 수 있다. Loss를 production이 아닌 lab에서만 10%로 잠시 올리거나 반복 횟수를 늘린다.</li>
+            <li>Checksum incorrect는 checksum offload로 capture 지점의 계산 전 packet일 수 있다. 실제 receiver와 seq/ack를 함께 본다.</li>
+            <li><strong>항상 먼저 주입 제거:</strong> <code>docker compose -f labs/basic-network-observability/docker-compose.yml exec client tc qdisc del dev eth0 root</code></li>
+          </ul>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">docker compose -f labs/basic-network-observability/docker-compose.yml exec client tc qdisc show dev eth0<br>make down</div>
+          <p><strong>Cleanup 성공 기준:</strong> netem이 사라지고 baseline 요청 timing이 회복되며 lab container/network가 내려간다. 단순히 터미널을 닫는 것은 cleanup이 아니다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Netem 적용 방향을 숨기지 않는다.</strong> 오늘 client egress delay는 양방향 동일 delay가 아니다.</li>
+            <li><strong>Loss 확률을 request 실패율로 읽지 않는다.</strong> Packet 수·크기·TCP recovery·deadline이 결과를 바꾼다.</li>
+            <li><strong>Retransmission을 최초 원인으로 쓰지 않는다.</strong> Sequence 복구 동작이며 loss/drop 위치는 추가 증거가 필요하다.</li>
+            <li><strong>ESTABLISHED를 healthy로 읽지 않는다.</strong> Zero window, huge send queue, application stall도 ESTABLISHED일 수 있다.</li>
+            <li><strong>tcpdump timestamp를 절대 진실로 보지 않는다.</strong> Host clock offset, capture buffer, offload, 관측 지점의 영향을 기록한다.</li>
+            <li><strong>ACK와 application commit을 혼동하지 않는다.</strong> Timeout 뒤 retry 전에 idempotency/status 조회가 필요하다.</li>
+            <li><strong>평균만 비교하지 않는다.</strong> Random loss와 RTO는 tail을 길게 만들므로 분포·p95/p99·최댓값을 본다.</li>
+            <li><strong>Cleanup을 검증한다.</strong> 남은 qdisc는 이후 모든 실습 결과를 오염시킨다.</li>
+            <li><strong>Offload를 무조건 끄지 않는다.</strong> Capture artifact인지 먼저 판단하고, 변경이 필요하면 영향·rollback을 준비한다.</li>
+            <li><strong>Kernel field를 버전 불변 규격으로 암기하지 않는다.</strong> RFC의 protocol invariant와 구현 telemetry를 분리한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“p99가 20배 올랐고 retransmission도 증가했습니다. Network loss라고 결론내릴 수 있나요?”</strong><br>좋은 답변 구조: 결론 보류 → phase timing·양끝 pcap·5-tuple/timestamp → seq gap과 qdisc/NIC drop → rwnd/cwnd/RTO·app queue → NAT/LB 경계 → 안전한 canary/rollback → 관측 blind spot.</li>
+            <li><strong>“100Mbps, RTT 100ms path에서 TCP 한 flow가 link를 채우려면 무엇이 필요합니까?”</strong><br>좋은 답변 구조: BDP 약 1.25MB 계산 → min(cwnd,rwnd) → window scaling/buffer → slow start·loss response → application write/read와 CPU → 여러 flow 대안과 memory/latency trade-off.</li>
+            <li><strong>“Client에는 packet이 보이고 server에는 없습니다. 어디서 유실됐습니까?”</strong><br>좋은 답변 구조: capture 지점 정의 → 두 지점 사이 범위만 주장 → veth/bridge/NIC/router/LB counters → NAT tuple mapping → clock·offload 검증 → 추가 midpoint evidence → 변경 전 보존과 safe reroute.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>FIN <code>seq=5001</code>을 받은 peer는 어떤 ACK를 보내며 왜 그런가?</li>
+            <li>CLOSE_WAIT와 TIME_WAIT의 owner·정상 의미는 어떻게 다른가?</li>
+            <li>결제 POST 뒤 RST를 받았을 때 무조건 retry하면 안 되는 이유는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① ACK=5002, FIN이 sequence 1을 쓴다. ② CLOSE_WAIT는 peer FIN 뒤 local application close 대기, TIME_WAIT는 마지막 ACK 재전송과 old duplicate 격리를 위한 active closer state다. ③ TCP write/ACK와 business commit 경계가 달라 결과가 불명확할 수 있으므로 idempotency key·status query·bounded retry가 필요하다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Client egress에만 80ms delay를 넣었을 때 “RTT는 정확히 160ms 증가한다”고 단정할 수 없는 이유는?</li>
+            <li>같은 sequence range가 capture에 두 번 보이면 확정할 수 있는 것과 없는 것은?</li>
+            <li>5% packet loss 실험에서 HTTP 성공률이 95%와 같지 않은 이유는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 방향·packet 역할마다 qdisc 통과 여부가 다르고 jitter/processing/ACK 동작이 더해진다. ② Retransmission 후보와 sequence 복구는 말할 수 있지만 최초 packet의 정확한 loss hop은 양끝·중간 증거 없이 확정할 수 없다. ③ 확률 단위가 request가 아닌 packet이고 request당 packet 수, TCP recovery, RTO, deadline이 성공을 바꾼다. 문항당 방향/상태 1점, packet 증거 1점, trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9293.html" style="color:#0369a1;">RFC 9293 · TCP 기본 규격: sequence, ACK, state, retransmission</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc6298.html" style="color:#0369a1;">RFC 6298 · Retransmission Timer 계산과 관리</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc5681.html" style="color:#0369a1;">RFC 5681 · TCP congestion control: slow start, avoidance, fast retransmit/recovery</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc2018.html" style="color:#0369a1;">RFC 2018 · TCP Selective Acknowledgment option</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 21</strong><br>
+            <span>회상: refused/timeout/reset packet 차이 — Week 3 전체를 SYN·ACK·window·retransmission·FIN/RST 상태기계로 압축하고, 증상별 첫 packet evidence와 rollback runbook을 완성합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

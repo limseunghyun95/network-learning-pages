@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-20T09:00:39+09:00",
+  "updatedAt": "2026-08-21T09:10:47+09:00",
   "lessons": [
     {
       "day": 1,
@@ -176,6 +176,15 @@
       "path": "day-19.html",
       "kind": "lesson",
       "publishedAt": "2026-08-20T09:00:39+09:00"
+    },
+    {
+      "day": 20,
+      "week": 3,
+      "title": "랩: loss/delay와 socket state 관찰",
+      "summary": "격리된 Docker lab에서 delay와 loss를 주입하고 tcpdump·ss·curl·qdisc 증거를 5-tuple과 timestamp로 조인해 RTT/RTO·재전송·window·종료 상태를 진단합니다.",
+      "path": "day-20.html",
+      "kind": "lab",
+      "publishedAt": "2026-08-21T09:10:47+09:00"
     }
   ]
 }
