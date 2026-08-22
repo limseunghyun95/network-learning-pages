@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-21T09:10:47+09:00",
+  "updatedAt": "2026-08-22T09:21:23+09:00",
   "lessons": [
     {
       "day": 1,
@@ -185,6 +185,15 @@
       "path": "day-20.html",
       "kind": "lab",
       "publishedAt": "2026-08-21T09:10:47+09:00"
+    },
+    {
+      "day": 21,
+      "week": 3,
+      "title": "회상: refused/timeout/reset packet 차이",
+      "summary": "Refused의 즉시 RST, timeout의 무응답·SYN 재전송, established reset의 RST를 packet·socket state·timer·proxy 경계로 구분하고 Week 3 TCP 장애 runbook을 완성합니다.",
+      "path": "day-21.html",
+      "kind": "review",
+      "publishedAt": "2026-08-22T09:21:23+09:00"
     }
   ]
 }
