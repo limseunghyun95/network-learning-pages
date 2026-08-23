@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 22</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">HTTP · TLS · QUIC · WEEK 4 / DAY 22</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">HTTP semantics, method/status/header/body</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">Byte stream 위의 message를 분산 시스템 계약으로 읽기 · 개념 60분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            HTTP message는 method가 “무엇을 요청하는가”, target URI가 “어느 resource인가”, fields가 “조건·표현·routing metadata가 무엇인가”, content가 “어떤 representation 또는 처리 입력인가”, status가 “server가 그 요청을 어떻게 해석한 결과인가”를 합쳐 만든 계약이다. <strong>HTTP 200, TCP ACK, business commit은 서로 다른 성공 경계</strong>다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">HTTP</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Hypertext Transfer Protocol. Resource에 대한 request와 response의 의미를 정의하는 stateless application-level protocol이다. HTTP/1.1·2·3은 wire 표현이 달라도 core semantics를 공유한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Resource</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">URI로 식별되는 대상 개념. 파일 하나와 동일하지 않다. 주문, 검색 결과, 현재 사용자 상태처럼 server가 의미를 부여한 추상 대상일 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Representation</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">특정 시점 resource 상태를 표현한 data와 metadata의 묶음. 같은 resource도 JSON, HTML, gzip, 한국어 등 여러 representation을 가질 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Method</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Target resource에 수행하려는 의미. GET은 representation 전송, POST는 resource 고유 처리, PUT은 target 상태 생성·대체 같은 계약을 나타낸다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Safe</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client가 요청한 주된 의미가 server state 변경이 아닌 method 특성. GET·HEAD·OPTIONS·TRACE가 safe로 정의되지만 logging·billing 같은 부수 효과까지 “아무 변화 없음”을 뜻하지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Idempotent</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">동일 요청을 한 번 또는 여러 번 의도적으로 적용했을 때 server에 의도된 효과가 같은 성질. PUT·DELETE는 idempotent semantics지만 각 응답·로그·부수 효과가 완전히 동일하다는 뜻은 아니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Status code</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Response의 세 자리 결과 분류. 1xx 정보, 2xx 성공, 3xx redirection, 4xx client 쪽 request 문제, 5xx server가 유효한 request 수행에 실패한 계열이지만 개별 의미를 읽어야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Field / Header</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Message에 붙는 이름-값 metadata. HTTP/1.1에서는 header line으로 보이고 HTTP/2·3에서는 field section으로 encoding된다. Authorization, Content-Type, Cache-Control처럼 의미가 각자 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Content</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Message가 전달하는 byte. 흔히 body라고 부르지만 modern HTTP semantics 문서에서는 content로 설명한다. Method·status에 따라 의미나 존재 가능성이 달라진다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Content-Type</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">보내는 content의 media type과 parameter를 설명한다. <code>application/json</code>이라고 썼다고 JSON이 자동 검증되는 것은 아니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Accept</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client가 response로 선호하는 media type을 제시하는 content negotiation field. 보내는 request content의 type을 말하는 Content-Type과 반대 역할이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Origin / Intermediary</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Origin server는 target resource의 authoritative response를 만들고, proxy·gateway·cache 같은 intermediary는 request/response를 전달·변환·저장할 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Framing</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Message와 content 경계를 wire에서 식별하는 규칙. HTTP/1.1의 Content-Length/chunked와 HTTP/2·3 frame은 표현이 다르지만 semantics와 구분해야 한다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>HTTP를 “GET은 조회, POST는 생성” 수준에서 멈추면 retry, cache, proxy, API versioning, 보안 사고에서 잘못된 결정을 한다. Method와 status는 구현 편의가 아니라 중간 장비와 client가 자동 행동을 결정하는 shared contract다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>200은 business success 보증이 아니다.</strong> GraphQL/error envelope처럼 content 안에 실패를 담는 설계도 있고, 반대로 202는 요청을 받았지만 처리가 끝나지 않았음을 뜻한다.</li>
+            <li><strong>Method는 retry 가능성에 영향을 준다.</strong> Idempotent semantics는 자동 재시도 판단의 중요한 입력이지만, 실제 API가 계약을 어기거나 conditional request가 없으면 lost update가 생긴다.</li>
+            <li><strong>Fields는 data path를 바꾼다.</strong> Host/:authority는 routing, Authorization은 identity, Accept/Vary는 representation과 cache key, Content-Length는 framing에 영향을 준다.</li>
+            <li><strong>Proxy는 투명한 선이 아니다.</strong> Request를 terminate하고 새 upstream connection을 만들며 header를 추가·삭제하고 cache response나 자체 502/503을 만들 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:22%;">구간</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:50%;">MESSAGE / STATE</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:28%;">Owner·성공 경계</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① Client</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;"><strong>POST /orders/42</strong><br>Host · Authorization · Content-Type<br>Idempotency-Key · JSON content</td><td style="padding:9px;border:1px solid #dbe3e8;">Client가 intent·deadline·retry state 소유</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② Edge/LB</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">TLS terminate → authority/path route<br>request ID·forwarded metadata 추가</td><td style="padding:9px;border:1px solid #dbe3e8;">Front/back connection 별도</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ Cache/Proxy</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">Cache key·freshness·Vary 판단<br>forward 또는 stored response 선택</td><td style="padding:9px;border:1px solid #dbe3e8;">Intermediary policy·stored state</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ Origin</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">AuthN/AuthZ → validation → transaction<br><strong>201 Created</strong> · Location · ETag · JSON</td><td style="padding:9px;border:1px solid #dbe3e8;">Business state·commit owner</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ Response</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">Status + fields + content<br>proxy timing/cache metadata → client parse</td><td style="padding:9px;border:1px solid #dbe3e8;">Client가 protocol outcome 해석</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>Target 결정:</strong> Scheme, authority, path, query가 target resource와 routing에 참여한다. Fragment는 일반적으로 HTTP request target으로 전송되지 않는다.</li>
+            <li><strong>Method semantics:</strong> POST content를 origin이 resource 고유 규칙으로 처리한다. “POST=생성”은 흔한 API 관례이지 모든 POST의 표준 의미가 아니다.</li>
+            <li><strong>Fields 적용:</strong> Authorization은 protection space, Content-Type은 보낸 content, Accept는 원하는 response, Idempotency-Key는 별도 application contract를 나타낸다.</li>
+            <li><strong>Intermediary:</strong> Proxy는 hop-by-hop field를 처리하고 routing·cache policy에 따라 origin까지 보내지 않을 수 있다. Via/request ID로 관측 경계를 남긴다.</li>
+            <li><strong>Origin transaction:</strong> TCP ACK는 request byte 수신일 뿐 validation·authorization·DB commit을 보장하지 않는다. Commit과 response write 사이에도 failure window가 있다.</li>
+            <li><strong>Response 해석:</strong> Status, Location, ETag, content를 함께 읽는다. 201은 생성 결과, 202는 accepted-not-complete, 204는 content 없는 성공처럼 개별 semantics가 다르다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>상태 소유권:</strong> URI resource state는 origin, cache entry freshness는 cache, transport connection은 각 endpoint/proxy, retry attempt와 deadline은 client, transaction dedup은 application/idempotency store가 소유한다. 이 owner를 섞으면 “응답을 못 받았으니 처리되지 않았다” 같은 위험한 결론이 나온다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Semantics와 wire syntax를 분리하라</h3>
+          <p>HTTP/1.1은 start-line과 textual field line, content framing을 사용한다. HTTP/2는 stream 안의 HEADERS/DATA frame과 HPACK을, HTTP/3는 QUIC stream과 QPACK을 사용한다. 하지만 GET, 404, Content-Type, cache semantics 같은 의미는 RFC 9110을 공유한다. “HTTP header는 항상 줄바꿈된 text”라고 답하면 HTTP/2·3에서 틀린다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Method matrix: safe와 idempotent는 다르다</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:20%;">Method</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:20%;">Safe</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:22%;">Idempotent</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">핵심 의미·함정</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">GET</td><td style="padding:9px;border:1px solid #dbe3e8;">Yes</td><td style="padding:9px;border:1px solid #dbe3e8;">Yes</td><td style="padding:9px;border:1px solid #dbe3e8;">현재 선택된 representation 전송. Query URL에 secret을 넣지 않고 GET으로 state change를 설계하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">HEAD</td><td style="padding:9px;border:1px solid #dbe3e8;">Yes</td><td style="padding:9px;border:1px solid #dbe3e8;">Yes</td><td style="padding:9px;border:1px solid #dbe3e8;">GET과 같은 header semantics, response content 없음. 구현이 GET metadata와 일치하는지 본다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">POST</td><td style="padding:9px;border:1px solid #dbe3e8;">No</td><td style="padding:9px;border:1px solid #dbe3e8;">No</td><td style="padding:9px;border:1px solid #dbe3e8;">Resource 고유 처리. Retry가 필요하면 idempotency key·dedup·status query를 application 계약으로 추가한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">PUT</td><td style="padding:9px;border:1px solid #dbe3e8;">No</td><td style="padding:9px;border:1px solid #dbe3e8;">Yes</td><td style="padding:9px;border:1px solid #dbe3e8;">Target resource 상태를 supplied representation으로 생성·대체. If-Match로 lost update를 막는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">DELETE</td><td style="padding:9px;border:1px solid #dbe3e8;">No</td><td style="padding:9px;border:1px solid #dbe3e8;">Yes</td><td style="padding:9px;border:1px solid #dbe3e8;">Target와 현재 기능의 association 제거 요청. 물리 data 즉시 삭제·모든 후속 응답 동일을 보장하지 않는다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">Status는 category보다 개별 의미가 중요하다</h3>
+          <ul style="padding-left:22px;">
+            <li><strong>200 OK:</strong> Method에 따라 성공 의미와 content가 다르다. GET은 representation, POST는 처리 결과일 수 있다.</li>
+            <li><strong>201 Created:</strong> 하나 이상의 resource가 생성됐고 Location이 primary resource를 가리킬 수 있다.</li>
+            <li><strong>202 Accepted:</strong> 처리를 수락했지만 완료되지 않았다. Job/status resource와 최종 실패 관측이 필요하다.</li>
+            <li><strong>204 No Content:</strong> 성공했지만 response content가 없다. Client가 empty JSON으로 parsing하지 않아야 한다.</li>
+            <li><strong>304 Not Modified:</strong> Conditional GET/HEAD에 선택 representation을 다시 보내지 않는 cache validation 결과이며 일반 3xx redirect가 아니다.</li>
+            <li><strong>409/412/429:</strong> Conflict, precondition failure, rate limit은 각각 다른 retry/사용자 조치가 필요하다.</li>
+            <li><strong>502/503/504:</strong> Gateway upstream error, temporary unavailable, gateway timeout의 owner를 response header·proxy log로 분리한다.</li>
+          </ul>
+
+          <h3 style="font-size:18px;color:#075985;">Fields·content·framing의 보안 경계</h3>
+          <p>Content-Length는 media type이 아니라 framing metadata다. Content-Type은 byte 해석, Content-Encoding은 representation coding, Transfer-Encoding은 HTTP/1.1 message transfer coding을 설명한다. Front proxy와 backend가 message length를 다르게 해석하면 request smuggling 위험이 생긴다. Parser가 여러 Content-Length 또는 Transfer-Encoding 조합을 어떻게 거부하는지 engine/version별로 검증한다.</p>
+          <p>Header에는 Authorization·Cookie·trace baggage 같은 secret과 개인정보가 들어갈 수 있다. 무제한 field size는 memory/CPU 공격, CRLF 처리 오류는 header injection, 신뢰하지 않은 Host/:authority는 cache poisoning·routing 문제를 만들 수 있다. Allowlist, size limit, normalization 후 validation, hop-by-hop 처리와 redaction을 둔다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Method contract</td><td style="padding:9px;border:1px solid #dbe3e8;">Resource와 state transition부터 정하고 method를 선택한다. GET으로 mutation, POST를 무조건 create로 쓰는 관습을 피한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Status precision</td><td style="padding:9px;border:1px solid #dbe3e8;">Transport 성공과 domain 결과를 분리하고 201/202/204/409/412/429/503 의미를 일관되게 쓴다. Error envelope에 stable machine code·request ID·safe detail을 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Retry safety</td><td style="padding:9px;border:1px solid #dbe3e8;">Method idempotence만 보지 말고 idempotency key, conditional request, 결과 조회, deadline, retry budget을 함께 설계한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Content validation</td><td style="padding:9px;border:1px solid #dbe3e8;">Content-Type allowlist, size limit, schema validation, charset/encoding 처리, decompression ratio limit을 application 읽기 전에 적용한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Conditional write</td><td style="padding:9px;border:1px solid #dbe3e8;">ETag와 If-Match를 사용해 read-modify-write lost update를 412로 드러낸다. Version field/transaction과 owner를 명확히 한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Cache contract</td><td style="padding:9px;border:1px solid #dbe3e8;">Cache-Control, Vary, validator, authenticated response policy를 명시한다. Personalized data가 shared cache key에서 섞이지 않게 한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">Method·route template·status class·upstream status·cache result·request/response bytes·phase latency를 기록하되 raw URL/secret/header cardinality를 제한한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">Proxy consistency</td><td style="padding:9px;border:1px solid #dbe3e8;">Edge와 origin의 parser·field limit·timeout·HTTP version 변환을 호환성 테스트한다. Hop-by-hop field와 forwarded identity의 trust boundary를 문서화한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border:1px solid #f0cf88;padding:14px 16px;"><strong>Anti-pattern:</strong> 모든 domain failure를 200+error JSON으로 숨기거나, 모든 POST timeout을 재시도하거나, Content-Type 없이 body를 추측하거나, raw Authorization/Cookie를 log에 남기거나, proxy와 origin의 framing parser 차이를 방치하지 않는다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <p><strong>상황:</strong> 배포 후 일부 POST가 중복 생성되고, proxy에는 504가 늘었으며 origin log에는 201이 남아 있다. 일부 client는 empty 204를 JSON parsing error로 기록한다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:23%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>증상</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Method·route·status·client version·proxy/upstream status·retry attempt·idempotency key별 중복률과 parsing error, connect/TTFB/total latency를 분리한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>먼저 수집할 증거/지표</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Request ID로 edge/proxy/origin log를 join하고 request method/target, redacted fields, content length/type, origin commit/idempotency record, response status/write timestamp, proxy deadline·retry log, client retry와 body parser를 변경 전에 보존한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>가능한 가설</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Origin commit 후 response 유실, proxy 504 뒤 client retry, idempotency key 미전파/TTL 부족, POST 자동 retry, 204 content assumption, 202를 완료로 오해, parser/framing 불일치, stale cache를 세운다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>안전한 첫 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">비멱등 자동 retry를 중단·제한하고 idempotency/status query 경로를 사용한다. 문제 client/proxy version을 canary에서 drain하고 transaction reconciliation을 시작한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>Rollback/복구</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">최근 proxy timeout/retry, status mapping, serializer/parser, cache rule을 known-good으로 원복한다. 신규 중복 중단→미확정 transaction 판정→status/body parsing 회복→504/p99 정상화 순서로 확인한다.</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;"><strong>하지 말아야 할 조치</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">모든 5xx 즉시 retry, 504를 미처리로 단정, DB 중복 수동 삭제 전 audit 미보존, timeout 무제한 확대, 모든 응답을 200으로 변환, Content-Length/Transfer-Encoding 검증 비활성화를 하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: 같은 TCP 위에서 semantics 분리하기</h2>
+          <p><strong>목표:</strong> Docker lab에서 method/status/fields/content를 바꾸며 raw request와 response를 관찰하고, proxy가 만든 upstream metadata와 origin 결과를 구분한다.</p>
+          <p><strong>사전 조건:</strong> Docker Desktop, 저장소 루트, 터미널 2개. 실행 전 GET/HEAD/POST의 response content, 204/503 처리, Content-Type과 Accept의 역할을 예측한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 packet 관측 (5분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">make up<br>docker compose -f labs/basic-network-observability/docker-compose.yml exec client tcpdump -ni eth0 -A -s 0 -c 80 'tcp port 8000 or tcp port 8080'</div>
+          <p>Capture에는 header/content가 보일 수 있으므로 lab data만 사용한다. 다른 터미널에서 다음 요청을 실행한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · Method와 content (10분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">docker compose -f labs/basic-network-observability/docker-compose.yml exec client curl -sv http://api.lab:8000/headers<br>docker compose -f labs/basic-network-observability/docker-compose.yml exec client curl -sSI http://api.lab:8000/headers<br>docker compose -f labs/basic-network-observability/docker-compose.yml exec client curl -sv -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' --data '{"order_id":42}' http://api.lab:8000/orders</div>
+          <p><strong>예상 관찰:</strong> API echo의 method/path/headers가 달라진다. HEAD는 구현이 지원하지 않으면 501 같은 결과를 낼 수 있는데, 이것도 “TCP 성공과 HTTP method 지원은 별개”라는 증거다. Content-Type은 보낸 JSON, Accept는 원하는 response를 설명한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · Status와 성공 경계 (8분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">docker compose -f labs/basic-network-observability/docker-compose.yml exec client sh -lc 'for code in 200 201 202 204 409 429 503; do curl -sS -o /tmp/body -D /tmp/head -w "requested=$code actual=%{http_code} bytes=%{size_download}\n" http://api.lab:8000/status/$code; sed -n "1,5p" /tmp/head; done'</div>
+          <p><strong>예상 관찰:</strong> Lab handler는 status에 관계없이 JSON content를 보낼 수 있어 204처럼 content가 허용되지 않는 status에서 client/server 구현 차이가 드러날 수 있다. “내 framework가 보냈다”가 protocol contract를 자동 보장하지 않음을 설명한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · Proxy가 만든 두 번째 connection (7분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">docker compose -f labs/basic-network-observability/docker-compose.yml exec client curl -sv -H 'X-Request-ID: day22-lab' http://proxy.lab:8080/api/headers<br>docker compose -f labs/basic-network-observability/docker-compose.yml logs --tail=30 proxy api</div>
+          <p><strong>예상 관찰:</strong> Client→proxy 8080과 proxy→api 8000은 별도 tuple이다. <code>X-Lab-Upstream</code>, echoed Host/headers, 양쪽 log timestamp로 어느 component가 response를 만들었는지 설명한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · 실패 주입과 cleanup (5분)</h3>
+          <div style="background:#111827;color:#e5e7eb;padding:14px;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">docker compose -f labs/basic-network-observability/docker-compose.yml exec client curl --max-time 1 -sv 'http://api.lab:8000/slow?seconds=2'<br>docker compose -f labs/basic-network-observability/docker-compose.yml logs --tail=20 api<br>make down</div>
+          <p><strong>예상 관찰:</strong> Client는 timeout이어도 origin이 request를 받아 처리했을 수 있다. GET이라 재시도 semantics는 안전하지만 POST side effect였다면 별도 idempotency 계약이 필요하다.</p>
+          <ul style="padding-left:22px;">
+            <li><code>Could not resolve host</code>면 lab DNS와 container 상태를 확인한다.</li>
+            <li>HEAD가 501이면 server method implementation 결과이며 network 장애가 아니다.</li>
+            <li>204 body 관찰은 curl/framework가 protocol에 따라 content를 무시할 수 있어 raw capture와 함께 본다.</li>
+            <li>JSON quote 오류는 shell escaping 문제다. Request capture의 actual content를 확인한다.</li>
+            <li>Cleanup 후 container/network가 내려갔는지 <code>docker compose ... ps</code>로 확인한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>POST는 반드시 create가 아니다.</strong> Resource 고유 처리 method다.</li>
+            <li><strong>Idempotent는 response가 항상 같다는 뜻이 아니다.</strong> 의도된 server 효과 기준이다.</li>
+            <li><strong>Safe method도 logging·metering 부수 효과는 있을 수 있다.</strong> Client가 state change를 요청하지 않는다는 뜻이다.</li>
+            <li><strong>200과 business success를 같게 두지 않는다.</strong> Status와 domain result 계약을 함께 본다.</li>
+            <li><strong>202는 완료가 아니다.</strong> Job status와 최종 실패 전달 경로가 필요하다.</li>
+            <li><strong>Content-Type과 Accept를 뒤집지 않는다.</strong> 전자는 보내는 content, 후자는 원하는 response다.</li>
+            <li><strong>HTTP/2·3 field를 항상 text line이라 설명하지 않는다.</strong> Semantics와 wire encoding을 분리한다.</li>
+            <li><strong>GET request content에 application 의미를 기대하지 않는다.</strong> Intermediary가 거부할 수 있고 표준상 일반적 의미가 없다.</li>
+            <li><strong>Hop-by-hop field를 무심코 forward하지 않는다.</strong> Connection별로 처리해야 한다.</li>
+            <li><strong>Raw URL/header를 metric label로 쓰지 않는다.</strong> Secret 노출과 cardinality 폭발을 만든다.</li>
+            <li><strong>Proxy 504가 origin rollback을 뜻하지 않는다.</strong> Commit 후 response failure window를 확인한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“Safe와 idempotent method 차이를 retry와 함께 설명하세요.”</strong><br>좋은 답변 구조: client-intended semantics 정의 → GET/HEAD safe+idempotent, PUT/DELETE idempotent-not-safe, POST neither → 부수 효과 예외 → timeout failure window → idempotency key/If-Match/status query → retry budget.</li>
+            <li><strong>“HTTP 200이면 요청이 성공했다고 볼 수 있습니까?”</strong><br>좋은 답변 구조: transport/TLS/HTTP/domain/transaction 성공 경계 분리 → method별 200 의미 → error envelope anti-pattern → 201/202/204/409/412 대안 → request ID·transaction state·observability.</li>
+            <li><strong>“Reverse proxy가 있는 API에서 request smuggling과 timeout 중복 처리를 어떻게 막습니까?”</strong><br>좋은 답변 구조: front/back parser·connection 분리 → framing normalization/ambiguous message reject → field limit → proxy deadline와 origin commit failure window → idempotency store → bounded retry → differential tests/rollback.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>SYN 직후 RST, SYN 재전송 후 무응답, data ACK 뒤 RST는 각각 무엇을 뜻하는가?</li>
+            <li>CLOSE_WAIT와 TIME_WAIT의 owner와 정상 의미 차이는?</li>
+            <li>POST 뒤 reset을 무조건 retry하면 안 되는 이유는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Refused/listener·reject, timeout/drop·route·deadline, established reset/abort·idle timeout. ② CLOSE_WAIT는 local app close 대기, TIME_WAIT는 active closer의 마지막 ACK/old duplicate 안전 state다. ③ TCP ACK와 business commit 경계가 달라 결과 불명확·중복 side effect가 가능하다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>PUT이 idempotent지만 동시 수정에서 lost update를 막지 못하는 이유와 보완책은?</li>
+            <li>Content-Type, Accept, Content-Length의 owner와 역할을 각각 설명하라.</li>
+            <li>Origin log는 201인데 client가 proxy 504를 받은 경우 어떤 failure window와 안전 조치가 필요한가?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 반복 효과는 같아도 stale representation이 최신 상태를 덮을 수 있어 ETag+If-Match/412가 필요하다. ② Sender가 Content-Type으로 보낸 content를 설명하고 client가 Accept로 원하는 response를 제시하며 sender/framing layer가 Content-Length로 byte 길이를 알린다. ③ Commit 후 response가 deadline 안에 전달되지 않은 결과 불명확 구간이므로 status query/idempotency record로 판정하고 비멱등 blind retry를 막는다. 문항당 semantics 1점, owner/flow 1점, failure trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9110.html" style="color:#0369a1;">RFC 9110 · HTTP Semantics: methods, status, fields, content</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9111.html" style="color:#0369a1;">RFC 9111 · HTTP Caching</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9112.html" style="color:#0369a1;">RFC 9112 · HTTP/1.1 message syntax와 routing</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9113.html" style="color:#0369a1;">RFC 9113 · HTTP/2 framing과 stream</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 23</strong><br>
+            <span>HTTP/1.1 keep-alive와 pipelining 한계 — connection 재사용이 handshake 비용을 줄이는 대신 queue, stale socket, head-of-line blocking, retry failure window를 어떻게 만드는지 packet과 pool state로 추적합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

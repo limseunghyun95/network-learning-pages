@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-22T09:21:23+09:00",
+  "updatedAt": "2026-08-23T09:14:07+09:00",
   "lessons": [
     {
       "day": 1,
@@ -194,6 +194,15 @@
       "path": "day-21.html",
       "kind": "review",
       "publishedAt": "2026-08-22T09:21:23+09:00"
+    },
+    {
+      "day": 22,
+      "week": 4,
+      "title": "HTTP semantics, method/status/header/body",
+      "summary": "HTTP method·status·field·content를 resource/representation 계약으로 이해하고 safe·idempotent·cache·proxy·framing·business commit의 상태 소유권과 실패 구간을 진단합니다.",
+      "path": "day-22.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-23T09:14:07+09:00"
     }
   ]
 }
