@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 23</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">HTTP · TLS · QUIC · WEEK 4 / DAY 23</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">HTTP/1.1 keep-alive와 pipelining 한계</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">한 TCP byte stream의 비용 절감과 순서 제약을 상태·queue로 추적하기 · 개념 60분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            HTTP/1.1 persistent connection은 TCP/TLS 연결 비용을 여러 request가 나눠 쓰게 하지만, 하나의 <strong>순서 있는 byte stream</strong>에서는 각 message 경계를 정확히 알아야 다음 message를 읽을 수 있고 pipelined response도 request 순서를 지켜야 한다. 그래서 성능은 handshake 횟수만이 아니라 <strong>pool·framing·queue·timeout·retry 불확실성</strong>으로 결정된다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Persistent connection</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">HTTP message 하나가 끝난 뒤 TCP connection을 닫지 않고 같은 origin의 다음 request/response에 재사용하는 방식. HTTP/1.1에서는 특별히 닫겠다는 신호가 없으면 persistence가 기본이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Keep-alive</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">보통 persistent connection을 뜻하는 실무 표현. HTTP/1.1 persistence와 과거 HTTP/1.0의 <code>Connection: keep-alive</code> 관례를 구분해야 한다. <code>Keep-Alive: timeout=...</code> 같은 값은 모든 구현이 동일하게 보장하는 표준 계약으로 가정하면 안 된다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Connection pool</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client나 proxy가 destination별 연결을 보관·대여·반납하는 자료구조. idle/active 수, 최대 연결 수, 대기 queue, idle timeout, max age가 핵심 state다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Pipelining</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">앞 request의 response를 기다리지 않고 동일 HTTP/1.1 connection에 뒤 request를 연속 전송하는 기능. Server는 response를 request와 같은 순서로 보내야 하므로 앞 작업이 느리면 뒤 결과도 막힌다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">HOL blocking</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Head-of-line blocking. 줄 맨 앞 항목의 지연이 뒤의 독립적인 항목 진행까지 막는 현상. HTTP/1.1 response ordering의 application HOL과 TCP 손실 복구의 byte-stream HOL을 분리해 말한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Message framing</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">한 message의 끝을 판정하는 규칙. Content-Length, chunked transfer coding, method/status가 content를 허용하지 않는 규칙, connection close 등이 우선순위에 따라 사용된다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Hop-by-hop field</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">한 transport hop에만 적용되고 proxy가 다음 hop으로 그대로 전달하면 안 되는 field. <code>Connection</code>과 그 값이 지목한 field가 대표적이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Idle timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">일정 시간 traffic이 없는 connection을 owner가 닫는 timer. Client, proxy, LB, NAT/conntrack, server가 서로 다른 timer를 가질 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Stale socket</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Pool에는 재사용 가능해 보이지만 peer나 middlebox는 이미 닫았거나 state를 지운 connection. 다음 write 때 EOF, RST, broken pipe 등으로 드러날 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">FIN / RST</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">FIN은 해당 방향의 정상 byte 전송 종료, RST는 connection state의 즉시 abort를 알리는 TCP 신호다. Application이 이를 관찰하는 시점은 실제 peer 종료 시점보다 늦을 수 있다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>새 request마다 TCP와 TLS를 다시 연결하면 RTT, CPU, ephemeral port, NAT/conntrack state 비용이 늘어난다. 재사용은 이를 줄이지만 connection이 오래 살수록 양 끝과 중간 장비의 state lifetime이 어긋날 가능성도 커진다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Latency:</strong> 이미 열린 connection은 handshake를 생략하고 congestion window가 유지될 수도 있어 빠르다. 다만 과도하게 오래된 connection은 path 변화나 stale state를 품을 수 있다.</li>
+            <li><strong>Capacity:</strong> Connection 수를 늘리면 HTTP/1.1 동시성은 올라가지만 server fd, memory, proxy upstream slot, NAT port를 소비한다. 무제한 pool은 해결책이 아니다.</li>
+            <li><strong>Correctness:</strong> 이전 response content를 끝까지 소비하지 않으면 다음 response의 시작 위치를 모른다. Pool에 반납해서는 안 된다.</li>
+            <li><strong>Failure ambiguity:</strong> 재사용 socket에 request를 쓴 직후 reset되면 server가 처리 전인지, 처리 후 response만 잃었는지 client가 모를 수 있다. 비멱등 요청 blind retry는 중복 side effect를 만든다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:19%;">구간</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:50%;">CONNECTION · MESSAGE FLOW</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">Owner state</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① Client</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">Pool[origin] → TCP C1 대여<br>Req A → Req B → Req C</td><td style="padding:9px;border:1px solid #dbe3e8;">idle/active, wait queue, deadline</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② Edge/LB</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">front C1 terminate<br>↓ 별도 mapping/policy ↓</td><td style="padding:9px;border:1px solid #dbe3e8;">front idle timer, drain, routing</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ Proxy pool</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">Upstream TCP U7 대여<br>Req A → Req B → Req C</td><td style="padding:9px;border:1px solid #dbe3e8;">backend pool·queue·max age</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ Origin</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">A 처리 900ms · B 10ms · C 20ms<br><strong>Resp A → Resp B → Resp C</strong></td><td style="padding:9px;border:1px solid #dbe3e8;">parser, request queue, app work</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ TCP path</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff1f2;text-align:center;">한 sequence space의 ordered bytes<br>loss → 재전송 전 뒤 byte 전달 대기</td><td style="padding:9px;border:1px solid #dbe3e8;">kernel send/receive buffer, RTO</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>대여:</strong> Client는 scheme·host·port와 TLS/security 조건이 맞는 idle connection을 pool에서 가져온다. 없으면 pool limit 안에서 새 TCP를 연결하거나 queue에서 기다린다.</li>
+            <li><strong>Framing:</strong> Parser는 response A의 content 길이를 확정하고 그 byte를 모두 소비해야 B의 status line을 정확히 찾을 수 있다.</li>
+            <li><strong>Pipelining:</strong> A 응답 전 B와 C를 보낼 수 있으나 response는 A, B, C 순서다. B가 먼저 계산돼도 A 앞을 추월할 수 없어 application HOL이 생긴다.</li>
+            <li><strong>Proxy 경계:</strong> Client↔LB C1과 proxy↔origin U7은 서로 다른 connection이다. 한쪽의 keep-alive 설정이나 <code>Connection: close</code>를 반대편에 그대로 동일시하면 안 된다.</li>
+            <li><strong>TCP HOL:</strong> U7에서 앞 sequence byte가 손실되면 뒤에 도착한 byte도 application에는 순서대로 전달돼야 한다. 이는 HTTP response ordering과 별개 층의 blocking이다.</li>
+            <li><strong>반납:</strong> Response content를 완전히 읽고 protocol 상태가 clean하며 close 신호가 없을 때만 pool에 idle로 반납한다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>핵심 불변식:</strong> 하나의 HTTP/1.1 connection에서 request와 final response의 대응은 순서로 결정된다. 따라서 sender와 recipient가 message length를 같은 방식으로 판정해야 하고, response N의 끝이 확정되기 전에는 response N+1의 시작도 안전하게 확정할 수 없다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Persistence는 framing 위에 세워진다</h3>
+          <p>Connection close만으로 body 끝을 알리는 response는 connection을 다음 message에 재사용할 수 없다. 재사용하려면 recipient가 Content-Length, 마지막 chunk, HEAD/1xx/204/304 같은 no-content 규칙, CONNECT 성공 후 tunnel 전환 등으로 현재 message 끝을 스스로 판정해야 한다. 서로 다른 parser가 Content-Length와 Transfer-Encoding 충돌을 다르게 해석하면 단순 오류를 넘어 request smuggling 보안 문제가 된다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">순차 사용, pipelining, 병렬 connection 비교</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:26%;">모델</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:34%;">장점</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">비용·한계</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">1 connection 순차</td><td style="padding:9px;border:1px solid #dbe3e8;">단순하고 response 대응 명확</td><td style="padding:9px;border:1px solid #dbe3e8;">Request당 최소 한 번의 response 대기, 동시성 낮음</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">HTTP/1.1 pipelining</td><td style="padding:9px;border:1px solid #dbe3e8;">Request 전송 왕복 대기 일부 제거</td><td style="padding:9px;border:1px solid #dbe3e8;">Ordered response HOL, 취소·실패·중간 proxy 호환성 복잡성 때문에 널리 의존하기 어렵다</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">여러 HTTP/1.1 connection</td><td style="padding:9px;border:1px solid #dbe3e8;">느린 request를 다른 connection과 격리</td><td style="padding:9px;border:1px solid #dbe3e8;">Handshake, fd, memory, cwnd 경쟁, NAT port와 backend slot 소비</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;">HTTP/2 multiplexing</td><td style="padding:9px;border:1px solid #dbe3e8;">한 connection의 여러 stream response가 application 순서를 추월 가능</td><td style="padding:9px;border:1px solid #dbe3e8;">Stream/connection flow control 필요, TCP loss의 connection-level HOL은 남음</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">State owner와 성공 확정 시점</h3>
+          <ul style="padding-left:22px;">
+            <li><strong>Client library:</strong> pool key, lease, idle eviction, response consumption, retry eligibility를 소유한다. <code>send()</code> 반환이나 kernel write 성공은 origin 처리 성공이 아니다.</li>
+            <li><strong>Kernel:</strong> TCP sequence, ACK, retransmission, send/receive buffer를 소유한다. TCP ACK는 peer kernel byte 수신 증거다.</li>
+            <li><strong>LB/NAT:</strong> flow mapping과 idle timer를 소유한다. State가 만료되어도 client socket object가 즉시 사라지지는 않는다.</li>
+            <li><strong>Server:</strong> keep-alive timeout, connection당 최대 request, parser, application 처리 상태를 소유한다. 정상 drain에서는 새 요청을 제한하고 in-flight를 마친 뒤 닫는다.</li>
+            <li><strong>Business system:</strong> transaction commit과 idempotency record를 소유한다. Response 유실 시 status query나 dedup state가 최종 판정 근거다.</li>
+          </ul>
+
+          <h3 style="font-size:18px;color:#075985;">Stale connection race의 failure window</h3>
+          <p><code>t0</code>에 connection이 idle pool에 들어가고, <code>t1</code>에 LB가 idle timeout으로 mapping을 지우며, <code>t2</code>에 client가 같은 socket을 대여하고, <code>t3</code>에 POST byte를 쓴 직후 RST를 받을 수 있다. 실패가 “쓰기 전”으로 확정되면 안전한 재연결이 쉽지만, 일부 또는 전체 request가 origin에 도달했는지 모르면 결과는 ambiguous다. TCP keepalive probe도 죽은 peer 탐지에는 도움을 주지만 모든 NAT·application 상태와 business outcome을 보증하지 않는다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Pool을 origin별로 제한</td><td style="padding:9px;border:1px solid #dbe3e8;">Peak concurrency, upstream capacity, deadline을 수치화해 max active와 wait queue를 제한한다. 무제한 생성은 overload를 fd·port 고갈로 옮긴다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Response를 끝까지 consume</td><td style="padding:9px;border:1px solid #dbe3e8;">Body를 읽거나 명시적으로 폐기·close하고, library가 재사용 안전을 확인한 connection만 반납한다. 부분 body socket을 재사용하면 framing이 깨진다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Idle/max age를 정렬</td><td style="padding:9px;border:1px solid #dbe3e8;">Client idle timeout을 관측된 LB/server timeout보다 보수적으로 짧게 하고 jitter를 둔다. DNS/backend rotation과 certificate 갱신을 위해 max connection age도 검토한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Pipelining에 암묵 의존 금지</td><td style="padding:9px;border:1px solid #dbe3e8;">Client·proxy·origin 전 구간 지원과 workload 분포를 증명하지 못하면 순차 reuse나 bounded parallel pool, HTTP/2를 택한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Retry를 protocol state로 제한</td><td style="padding:9px;border:1px solid #dbe3e8;">Safe/idempotent method, request가 전송되지 않았다는 확정, idempotency key/dedup 여부를 함께 본다. Retry budget·backoff·deadline을 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Graceful drain</td><td style="padding:9px;border:1px solid #dbe3e8;">Deployment 때 readiness 제외 → 새 connection/request 차단 → in-flight 완료 → 명시적 close 순서로 진행한다. Front/back pool을 각각 drain한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">관측성</td><td style="padding:9px;border:1px solid #dbe3e8;">new/reused connection 수, pool active/idle/wait, acquire latency, connection age, resets/EOF, retries, request queue, response bytes consumed를 origin·proxy hop별로 기록한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Engine/version 차이:</strong> Browser, language HTTP client, reverse proxy마다 HTTP/1.1 pipelining 사용 여부와 pool key·idle validation·retry 정책이 다르다. “HTTP/1.1이니 자동으로 pipeline한다” 또는 <code>Keep-Alive</code> field의 timeout/max 값을 강제 계약처럼 전제하지 말고 해당 구현 공식 문서와 traffic capture를 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">간헐적 EOF/reset, 첫 요청만 느림, pool acquire timeout, 뒤의 빠른 요청까지 p99 급증, 배포 직후 중복 주문.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">5-tuple·connection age·reuse 여부·request ID·method·bytes written/read·FIN/RST 발신 시점, pool active/idle/wait/acquire latency, LB/backend idle timeout, server access/transaction log, packet timestamp.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">Client보다 짧은 LB idle timeout으로 stale reuse, response 미소비, HTTP/1.1 ordered response HOL, pool 과소/과대 설정, deploy drain race, framing parser 불일치, slowloris connection 고갈.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">영향 origin의 stale idle connection만 폐기하고 신규 연결 비율을 제한적으로 높인다. 비멱등 retry는 중단하고 idempotency/status store로 결과를 판정한다. HOL이면 slow endpoint 격리나 제한된 추가 connection을 적용한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 pool/timeout 설정으로 rollback, unhealthy version을 readiness에서 제외, in-flight drain, 중복 transaction reconciliation 후 connection/error 지표가 baseline으로 돌아오는지 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">모든 timeout 무작정 확대, pool 무제한 증설, 모든 reset에 POST 즉시 재시도, 전체 connection 동시 강제 종료, Content-Length/Transfer-Encoding ambiguity를 관대하게 전달하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: 한 TCP에서 두 HTTP/1.1 response 읽기</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop, 저장소의 <code>labs/basic-network-observability</code>. 실행 전 예측한다: “두 GET의 client source port가 같은가?”, “첫 response body를 읽지 않으면 왜 다음 response를 안전하게 해석할 수 없는가?”, “Server를 idle 중 종료한 뒤 같은 socket write는 어디서 실패하는가?”</p>
+          <h3 style="font-size:18px;color:#075985;">0단계 · Lab 시작과 HTTP/1.1 server (5분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>cd labs/basic-network-observability
+make up
+docker compose exec api sh -lc 'python3 -m http.server 9005 --bind 0.0.0.0 --protocol HTTP/1.1 --directory /etc'</code></pre>
+          <p>마지막 명령은 foreground다. 이 terminal을 A로 둔다. Python 버전이 <code>--protocol</code>을 지원하지 않으면 <code>python3 -m http.server --help</code>로 확인하고, 실습은 기존 HTTP/1.0 server의 close framing 비교로 축소한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · Packet과 socket 관측 (5분)</h3>
+          <p>Terminal B:</p>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose exec client sh -lc "tcpdump -ni eth0 -tttt -nn -A -s 0 'host 172.28.0.20 and tcp port 9005'"</code></pre>
+          <p>예상: 첫 요청 전에 SYN/SYN-ACK/ACK 한 번만 보이고, 뒤의 두 GET과 두 HTTP/1.1 response가 같은 5-tuple에 나타난다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · 순차 재사용과 body 소비 (10분)</h3>
+          <p>Terminal C에서 아래 명령을 실행한다. 첫 response의 <code>read()</code>가 message content를 끝까지 소비하므로 같은 connection을 재사용할 수 있다.</p>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose exec client python3 -c 'import http.client; c=http.client.HTTPConnection("172.28.0.20",9005,timeout=3); c.request("GET","/hostname",headers={"Host":"api.lab"}); r=c.getresponse(); print("R1",r.status,r.getheader("Content-Length"),r.read()); print("PORT1",c.sock.getsockname()[1]); c.request("GET","/hosts",headers={"Host":"api.lab"}); r=c.getresponse(); print("R2",r.status,len(r.read())); print("PORT2",c.sock.getsockname()[1]); c.close()'</code></pre>
+          <p><strong>예상 관찰:</strong> PORT1과 PORT2가 같고 handshake가 추가되지 않는다. Server log도 같은 client connection에서 두 GET을 순서대로 보인다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · Raw pipelining과 순서 예측 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose exec client python3 -c 'import socket,time; s=socket.create_connection(("172.28.0.20",9005),3); q=b"GET /hostname HTTP/1.1\r\nHost: api.lab\r\n\r\nGET /hosts HTTP/1.1\r\nHost: api.lab\r\nConnection: close\r\n\r\n"; s.sendall(q); time.sleep(.2); data=b""; exec("while True:\n b=s.recv(65535)\n if not b: break\n data+=b"); print(data.decode("latin1")[:1200])'</code></pre>
+          <p>예상: request 둘은 response 대기 없이 연속 전송되지만 출력의 response는 <code>/hostname</code> 다음 <code>/hosts</code> 순서다. 이것이 “multiplexing”이 아닌 이유를 설명한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · 실패 주입과 cleanup (7분)</h3>
+          <p>Terminal A에서 <code>Ctrl-C</code>로 server를 종료한 뒤 idle connection 재사용 상황을 떠올린다. 실제 client library가 FIN을 먼저 읽으면 재연결할 수 있고, race에서는 write 뒤 EOF/RST가 날 수 있다. 비멱등 POST였다면 도달 여부를 packet·server transaction log 없이 단정할 수 없다.</p>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose down -v</code></pre>
+          <p><strong>자주 나는 오류:</strong> port 9005 refused면 server terminal과 container IP를 확인한다. <code>ResponseNotReady</code>가 나면 이전 response를 완전히 읽지 않은 것이다. tcpdump 권한 오류면 lab image·capability를 <code>docker compose config</code>에서 확인한다. Cleanup은 임시 container/network/volume만 제거한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>HTTP/1.1에서 <code>Connection: keep-alive</code>가 항상 필요한 것은 아니다.</strong> Persistence가 기본이며 닫으려면 보통 <code>Connection: close</code>를 사용한다.</li>
+            <li><strong>Keep-alive는 TCP keepalive와 다르다.</strong> 전자는 HTTP connection 재사용, 후자는 kernel의 오래된 TCP peer 탐지 probe다.</li>
+            <li><strong>Response 객체 close와 body 완전 소비는 library마다 다르다.</strong> Close가 drain 후 reuse인지 socket 폐기인지 공식 문서를 확인한다.</li>
+            <li><strong>LB 한 개가 connection 하나를 end-to-end 유지하지 않는다.</strong> Front connection과 backend pool은 별도 5-tuple·timer·TLS state다.</li>
+            <li><strong>Idle timeout만 맞추면 끝이 아니다.</strong> Max request, max age, deploy drain, DNS rotation, NAT timeout도 connection lifetime을 바꾼다.</li>
+            <li><strong>Pipelining은 HTTP/2 multiplexing이 아니다.</strong> HTTP/1.1 response는 request 순서를 지키지만 HTTP/2 stream은 독립적으로 interleave된다.</li>
+            <li><strong>Connection 수 증가는 공짜 병렬성이 아니다.</strong> fd, memory, TLS CPU, congestion competition, ephemeral port, upstream capacity를 함께 소비한다.</li>
+            <li><strong>Parser 관대함은 호환성이 아니라 공격면일 수 있다.</strong> Front/back framing 불일치는 request smuggling으로 이어진다.</li>
+            <li><strong>Slowloris 방어:</strong> header/body read timeout, header size, connection 수, request rate를 경계별로 제한하고 정상 느린 client와 trade-off를 측정한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“HTTP/1.1 keep-alive가 성능을 높이는데도 장애를 만드는 이유를 설명하세요.”</strong><br>좋은 답변 구조: handshake·cwnd 비용 절감 → pool owner/state → message framing 불변식 → LB/NAT/server timer 불일치 → stale reuse timeline → method별 retry eligibility → bounded pool·idle/max-age·drain·metrics.</li>
+            <li><strong>“Pipelining과 HTTP/2 multiplexing의 차이는 무엇입니까?”</strong><br>좋은 답변 구조: 한 TCP ordered byte stream 공통점 → HTTP/1.1 request 순서와 ordered response HOL → HTTP/2 stream ID와 frame interleave → TCP loss HOL 잔존 → workload 수치(p50/p99·동시성) → parallel connection/HTTP/3 대안.</li>
+            <li><strong>“POST를 재사용 connection에 보낸 직후 reset됐습니다. 어떻게 처리합니까?”</strong><br>좋은 답변 구조: bytes written/ACK/business commit 성공 경계 → FIN/RST·pcap·proxy/origin log 수집 → 결과 불명확 인정 → blind retry 금지 → idempotency key·dedup/status query·reconciliation → timeout 정렬과 rollback.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>HTTP method의 safe와 idempotent는 어떻게 다른가?</li>
+            <li>TCP ACK, HTTP 2xx, DB commit의 성공 경계를 구분하라.</li>
+            <li>Content-Type, Accept, Content-Length가 각각 설명하는 것은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Safe는 요청한 주된 의미가 read-only, idempotent는 반복 적용의 의도된 효과가 같다는 뜻이다. ② Peer kernel byte 수신, protocol 결과, durable business state 확정으로 owner가 다르다. ③ 보낸 content media type, 원하는 response media type, HTTP/1.1 message content byte 길이다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>HTTP/1.1 connection을 재사용하려면 response body를 왜 완전히 소비해야 하는가?</li>
+            <li>Client idle timeout 90초, LB timeout 60초일 때 70초 idle 후 어떤 race가 가능한가?</li>
+            <li>HTTP/1.1 pipelining의 application HOL과 TCP HOL을 각각 설명하라.</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 현재 message 끝이 확정돼야 다음 status line 시작을 판정하고 clean socket을 pool에 반납할 수 있다. ② Client는 socket을 live로 대여하지만 LB flow는 만료돼 다음 write에 EOF/RST가 나며 request 도달 여부가 불명확할 수 있다. ③ 앞 response의 순서 제약이 뒤 response 전송을 막는 것과, 앞 sequence byte 손실이 뒤 byte의 application 전달을 막는 것이다. 문항당 정의 1점, owner/flow 1점, failure·대안 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9112.html" style="color:#0369a1;">RFC 9112 · HTTP/1.1 message framing, persistence, pipelining, security</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9110.html" style="color:#0369a1;">RFC 9110 · HTTP Semantics와 hop-by-hop fields</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9113.html" style="color:#0369a1;">RFC 9113 · HTTP/2 streams와 multiplexing 비교</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 24</strong><br>
+            <span>HTTP/2 stream, multiplexing, flow control — HEADERS/DATA frame이 한 connection에서 interleave되는 방식과 stream·connection window, priority, TCP HOL, overload 경계를 추적합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

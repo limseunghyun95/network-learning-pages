@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-23T09:14:07+09:00",
+  "updatedAt": "2026-08-24T09:07:28+09:00",
   "lessons": [
     {
       "day": 1,
@@ -203,6 +203,15 @@
       "path": "day-22.html",
       "kind": "lesson",
       "publishedAt": "2026-08-23T09:14:07+09:00"
+    },
+    {
+      "day": 23,
+      "week": 4,
+      "title": "HTTP/1.1 keep-alive와 pipelining 한계",
+      "summary": "HTTP/1.1 persistent connection의 framing 불변식, ordered response HOL, connection pool·idle timeout·stale socket·retry failure window를 packet과 상태 소유권으로 진단합니다.",
+      "path": "day-23.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-24T09:07:28+09:00"
     }
   ]
 }
