@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-24T09:07:28+09:00",
+  "updatedAt": "2026-08-25T09:10:42+09:00",
   "lessons": [
     {
       "day": 1,
@@ -212,6 +212,15 @@
       "path": "day-23.html",
       "kind": "lesson",
       "publishedAt": "2026-08-24T09:07:28+09:00"
+    },
+    {
+      "day": 24,
+      "week": 4,
+      "title": "HTTP/2 stream, multiplexing, flow control",
+      "summary": "HTTP/2 frame·stream state와 multiplexing, stream/connection flow-control window, TCP HOL, RST_STREAM·GOAWAY의 failure scope를 packet·queue·timer 관점으로 진단합니다.",
+      "path": "day-24.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-25T09:10:42+09:00"
     }
   ]
 }
