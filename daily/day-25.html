@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 25</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">HTTP · TLS · QUIC · WEEK 4 / DAY 25</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">TLS certificate chain, SNI, ALPN, handshake</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">암호화 연결을 신원·key agreement·protocol 선택의 상태기계로 읽기 · 개념 65분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            TLS handshake는 “자물쇠를 켠다”가 아니라 ClientHello의 SNI·ALPN·key share에서 시작해 server certificate chain과 hostname을 검증하고, ephemeral key agreement로 traffic key를 만들며, transcript에 대한 CertificateVerify·Finished를 확인하는 분산 상태 전이다. <strong>TCP 연결, TLS 암호화, server identity, HTTP 성공은 서로 다른 성공 경계</strong>다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">TLS</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Transport Layer Security. Reliable byte stream 위에서 peer 인증, 기밀성, 무결성을 제공하는 protocol. TCP 자체의 delivery reliability와 역할이 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Certificate</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Public key와 subject/SAN, validity, issuer, usage 같은 identity metadata를 CA가 서명한 X.509 문서. Private key는 certificate 안에 들어 있지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Leaf / Intermediate / Root</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Leaf는 실제 service certificate, intermediate CA는 leaf를 발급·서명, root CA는 local trust store의 trust anchor다. Server는 보통 leaf와 필요한 intermediate를 보내고 root는 보내지 않아도 된다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Trust store</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client OS/runtime가 신뢰하도록 설치한 root CA 집합과 정책. 같은 server도 host, container, JVM의 trust store 차이로 결과가 달라질 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SAN</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Subject Alternative Name. Certificate가 유효한 DNS name/IP identity 목록. Client가 요청한 hostname과 SAN을 규칙에 따라 비교한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SNI</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Server Name Indication. ClientHello에서 접속하려는 hostname을 server에 알려 shared IP/LB가 알맞은 certificate와 virtual host를 선택하게 하는 TLS extension.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">ALPN</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Application-Layer Protocol Negotiation. TLS 안에서 <code>h2</code>, <code>http/1.1</code> 같은 상위 protocol을 협상한다. Server가 client 목록 중 하나를 선택한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">(EC)DHE key share</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Ephemeral Diffie-Hellman key agreement용 공개 값. 양쪽이 network에 shared secret을 직접 보내지 않고 같은 secret을 계산한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Forward secrecy</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">훗날 server 장기 private key가 유출돼도 과거 ephemeral session traffic을 복호화하기 어렵게 하는 성질.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Transcript hash</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">현재까지 handshake message를 순서대로 hash한 값. Negotiation 변조를 탐지하고 CertificateVerify·Finished가 같은 handshake를 봤는지 묶는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">AEAD</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Authenticated Encryption with Associated Data. TLS record payload를 암호화하면서 위·변조도 검출한다. TLS 1.3 cipher suite는 AEAD와 hash를 선택한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">mTLS</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Mutual TLS. Server뿐 아니라 client도 certificate로 인증하는 방식. Identity 발급·rotation·authorization 연결이 추가로 필요하다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>TLS 오류를 “인증서 문제”로 묶으면 DNS·시간·SNI routing·trust store·protocol negotiation·cipher policy를 구분하지 못한다. 반대로 <code>-k</code>로 검증을 끄고 연결되었다고 해결하면 암호화된 공격자에게 연결될 수 있다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Identity:</strong> Chain 서명이 맞아도 요청 hostname이 SAN에 없거나 certificate가 만료됐으면 그 service identity로 신뢰할 수 없다.</li>
+            <li><strong>Routing:</strong> SNI가 없거나 틀리면 같은 IP의 default certificate, TLS alert, 엉뚱한 tenant로 갈 수 있다.</li>
+            <li><strong>Protocol:</strong> ALPN이 <code>h2</code>를 선택했는데 peer가 HTTP/1.1 text를 보내면 TLS는 성공했어도 application protocol은 실패한다.</li>
+            <li><strong>Failure cost:</strong> TLS handshake는 RTT와 asymmetric crypto CPU를 쓰며, retry storm·짧은 connection lifetime·certificate rotation 오류가 LB capacity를 압박한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:18%;">시점</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:53%;">CLIENT → NETWORK/LB → SERVER</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">상태·성공 경계</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① t0</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">DNS A/AAAA → route/ARP·ND → TCP SYN/SYN-ACK/ACK</td><td style="padding:9px;border:1px solid #dbe3e8;">Kernel ESTABLISHED<br>TLS는 아직 아님</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② t1</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;"><strong>ClientHello</strong><br>supported_versions · key_share · signature_algorithms<br>SNI=www.rfc-editor.org · ALPN=h2,http/1.1</td><td style="padding:9px;border:1px solid #dbe3e8;">Client policy·random·ephemeral key</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ t2</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;"><strong>ServerHello</strong> + key_share<br>{EncryptedExtensions: ALPN=h2}<br>{Certificate chain} {CertificateVerify} {Finished}</td><td style="padding:9px;border:1px solid #dbe3e8;">Shared handshake keys<br>LB가 cert/private key 소유 가능</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ t3</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">Client: chain/path + SAN + validity + usage 검증<br>{Client Finished} → application traffic keys</td><td style="padding:9px;border:1px solid #dbe3e8;">Server identity·transcript 확인</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ t4</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">[HTTP/2 preface/frames 또는 HTTP/1.1 message]<br>Proxy/LB upstream에는 별도 TLS handshake 가능</td><td style="padding:9px;border:1px solid #dbe3e8;">Application protocol 시작<br>Front/back 보안 경계 분리</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>주소와 transport:</strong> DNS answer와 route가 peer IP를 정하고 TCP 연결이 성공해도 hostname identity는 아직 검증되지 않았다.</li>
+            <li><strong>ClientHello:</strong> Client는 지원 version·algorithm·key share와 SNI/ALPN preference를 보낸다. 전통적 SNI는 ClientHello 관측자에게 노출될 수 있어 TLS가 IP·traffic metadata 전체를 숨기는 것은 아니다.</li>
+            <li><strong>Key exchange:</strong> ServerHello의 key share와 client ephemeral private state로 shared secret을 계산하고 HKDF key schedule로 handshake traffic secret을 만든다. TLS 1.3은 ServerHello 뒤 handshake message를 보호한다.</li>
+            <li><strong>Authentication:</strong> CertificateVerify는 server가 certificate public key에 대응하는 private key를 소유하며 transcript에 서명했음을 보인다. Chain validation과 hostname match는 client policy가 수행한다.</li>
+            <li><strong>Key confirmation:</strong> Finished는 handshake secret과 transcript에 기반해 양쪽이 같은 handshake와 key를 공유함을 확인한다. 이 뒤 application traffic protection이 시작된다.</li>
+            <li><strong>Termination:</strong> Edge LB에서 TLS를 terminate하면 client↔LB와 LB↔origin은 서로 다른 certificate, key, cipher, socket, timeout을 가진다. “end-to-end TLS” 여부를 architecture에서 명시한다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>핵심 불변식:</strong> Client가 의도한 hostname과 검증한 certificate identity가 일치하고, certificate path가 local trust policy에서 유효하며, CertificateVerify와 Finished가 현재 transcript에 맞아야만 authenticated channel이다. 암호화 key가 만들어졌다는 사실만으로 올바른 server와 연결됐다고 결론 내릴 수 없다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Certificate path validation은 서명 한 번이 아니다</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:28%;">검증 축</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">질문과 failure</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Path/Signature</td><td style="padding:9px;border:1px solid #dbe3e8;">Leaf → intermediate → trust anchor로 issuer와 signature가 이어지는가? Intermediate 누락·wrong chain이면 unknown issuer가 난다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Identity</td><td style="padding:9px;border:1px solid #dbe3e8;">요청 hostname/IP가 SAN 규칙과 일치하는가? SNI로 cert 선택 성공과 client hostname validation은 관련 있지만 별도 단계다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Time</td><td style="padding:9px;border:1px solid #dbe3e8;">Client clock이 notBefore≤now≤notAfter인가? NTP drift도 만료처럼 보일 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Constraints/Usage</td><td style="padding:9px;border:1px solid #dbe3e8;">CA basicConstraints, path length, key usage, extended key usage가 server authentication에 맞는가?</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Policy/Revocation</td><td style="padding:9px;border:1px solid #dbe3e8;">Algorithm·key size·name constraints·revocation/OCSP 정책을 client가 어떻게 적용하는가? Engine마다 hard-fail/soft-fail 정책이 다를 수 있다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">TLS 1.3 key schedule과 성공 시점</h3>
+          <p>Client와 server는 (EC)DHE shared secret을 그대로 traffic key로 쓰지 않는다. HKDF-Extract/Expand 기반 key schedule이 early, handshake, master secret 단계와 client/server 방향별 traffic secret을 분리한다. Nonce는 record sequence와 key material로 만들며 같은 key/nonce 재사용은 AEAD 안전성을 깨뜨린다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>ServerHello 수신:</strong> Version·cipher·key share 선택과 handshake key derivation 가능. 아직 server certificate 검증 완료가 아니다.</li>
+            <li><strong>CertificateVerify 성공:</strong> Server private-key possession과 transcript signature 확인. Path/hostname policy도 통과해야 identity가 완성된다.</li>
+            <li><strong>Server Finished 성공:</strong> Server 쪽 handshake integrity와 key confirmation. Client는 자신의 Finished 전송 뒤 normal application traffic 단계로 간다.</li>
+            <li><strong>HTTP response:</strong> TLS record가 정상 복호화돼도 application authorization·transaction 성공과는 별도다.</li>
+          </ul>
+
+          <h3 style="font-size:18px;color:#075985;">SNI와 ALPN은 routing/control data다</h3>
+          <p>SNI는 shared listener가 certificate/tenant 설정을 선택하게 하고 ALPN은 같은 443 port에서 HTTP/2와 HTTP/1.1 같은 protocol parser를 선택하게 한다. 둘 다 “application content”가 아니라 handshake control path지만, 선택 결과가 이후 data path를 바꾼다. Proxy가 front TLS를 terminate하면 backend SNI와 ALPN은 새 ClientHello에서 다시 정해진다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Session resumption과 0-RTT trade-off</h3>
+          <p>TLS 1.3 resumption은 PSK ticket으로 full certificate handshake 비용을 줄일 수 있다. 0-RTT early data는 한 RTT를 더 줄이지만 replay protection이 일반 1-RTT application data와 같지 않다. 결제·생성 같은 비멱등 요청을 protocol 지원만 보고 0-RTT로 보내면 안 되며 application-level anti-replay/idempotency 정책이 필요하다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Private key 경계</td><td style="padding:9px;border:1px solid #dbe3e8;">LB/HSM/secret manager 중 termination owner를 명시하고 least privilege·audit·rotation을 둔다. Private key를 image·repository·메일에 넣지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">자동 갱신과 overlap</td><td style="padding:9px;border:1px solid #dbe3e8;">Expiry 훨씬 전 issuance, multi-instance propagation, old/new certificate overlap, rollback을 자동화하고 외부 probe로 실제 served chain을 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Full chain 제공</td><td style="padding:9px;border:1px solid #dbe3e8;">Server가 leaf와 필요한 intermediate를 순서대로 제공한다. Browser cache에만 기대지 말고 fresh container/client에서 검증한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Hostname 검증 유지</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>-k</code>/trust-all을 production fix로 쓰지 않는다. Internal service도 SAN·service identity·trust bundle을 명시하고 SNI와 Host/:authority 차이를 관리한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">TLS policy 단계적 rollout</td><td style="padding:9px;border:1px solid #dbe3e8;">Version·cipher·signature algorithm 변경 전 client inventory와 handshake failure를 관측하고 canary→rollback 가능 순서로 적용한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Timeout과 retry</td><td style="padding:9px;border:1px solid #dbe3e8;">DNS, connect, TLS handshake, request deadline을 분리 측정한다. Certificate verify failure는 반복 retry로 고쳐지지 않으며 retry storm만 만든다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">관측성</td><td style="padding:9px;border:1px solid #dbe3e8;">SNI, selected ALPN/TLS version, cipher, certificate fingerprint·issuer·notAfter, full/resumed, alert, handshake latency를 수집하되 secrets/session keys와 개인정보는 log하지 않는다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> OS, browser, OpenSSL/LibreSSL, JVM은 trust store, hostname rules, revocation, algorithm policy가 다르다. TLS 1.2 cipher suite 이름과 TLS 1.3 cipher suite의 의미도 같지 않다. 확인하지 않은 client compatibility를 단정하지 말고 실제 target runtime으로 canary한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">Certificate expired/unknown issuer/hostname mismatch, handshake_failure, no application protocol, 특정 tenant만 wrong certificate, TLS p99·CPU 급증.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">정확한 client clock·runtime/trust store, DNS IP, SNI, ALPN offer/selection, TLS version/cipher, served leaf/intermediate/SAN/notBefore/notAfter/fingerprint, alert, handshake timestamp, LB listener와 backend TLS log.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">갱신 미배포, intermediate 누락, SNI route/default cert, client clock drift, old trust bundle, protocol/cipher/signature overlap 없음, ALPN mismatch, private key와 certificate 불일치, LB CPU overload.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">영향 SNI·instance를 특정하고 정상 certificate bundle을 canary listener에 복구한다. 새 handshake 유입을 제한하고 유효한 기존 connection은 보존한다. Client 검증은 끄지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 유효 certificate/policy/listener config로 rollback, 모든 edge에서 fingerprint·chain·SAN 확인, trust bundle/clock 복구, handshake 성공률·ALPN·latency baseline 확인 후 gradual rollout한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>-k</code>/trust-all 배포, private key를 chat/log에 출력, 모든 TLS failure 무한 retry, 전체 LB 동시 재시작, 만료 certificate의 system clock 우회, hostname 검증을 Host header만으로 대체하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: SNI·ALPN·chain·hostname 실패 추적</h2>
+          <p><strong>사전 조건:</strong> <code>curl</code>, <code>openssl</code>, Python 3, 인터넷 연결. RFC Editor만 사용한다. 실행 전 “TCP 연결과 TLS 검증 중 어느 단계에서 실패하는가?”, “SNI와 hostname validation은 같은가?”, “ALPN 선택 뒤 어떤 parser가 필요한가?”를 답한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · End-to-end timing (5분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>curl -sS -o /dev/null --http2 \
+  -w 'dns=%{time_namelookup} tcp=%{time_connect} tls=%{time_appconnect} first=%{time_starttransfer} total=%{time_total} http=%{http_version}\n' \
+  https://www.rfc-editor.org/</code></pre>
+          <p><code>tls - tcp</code>는 대략 TLS 구간을 포함하지만 scheduling·reuse 영향을 받는다. 새 연결 여부와 proxy를 함께 확인하고 단일 표본을 SLO로 일반화하지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · SNI와 ALPN 관찰 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>printf '' | openssl s_client \
+  -connect www.rfc-editor.org:443 \
+  -servername www.rfc-editor.org \
+  -alpn h2,http/1.1 -tls1_3 -showcerts 2&gt;&amp;1 | \
+  grep -E 'Protocol|Cipher|ALPN|subject=|issuer=|Verify return code'</code></pre>
+          <p>예상: TLS 1.3 또는 local engine이 협상한 version, selected ALPN <code>h2</code>, leaf subject/issuer, verify 결과가 보인다. LibreSSL/OpenSSL 출력 형식은 다를 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · Leaf identity와 기간 읽기 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>printf '' | openssl s_client \
+  -connect www.rfc-editor.org:443 \
+  -servername www.rfc-editor.org 2&gt;/dev/null | \
+  openssl x509 -noout -subject -issuer -dates -fingerprint</code></pre>
+          <p>예상: Leaf subject, issuer, notBefore/notAfter, fingerprint가 나온다. 이 명령은 첫 certificate의 metadata 관찰이며 system trust·hostname policy 전체를 독립적으로 재구현하는 명령은 아니다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입: hostname mismatch (10분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>python3 -c 'import socket,ssl; c=ssl.create_default_context(); s=c.wrap_socket(socket.create_connection(("www.rfc-editor.org",443),3),server_hostname="www.rfc-editor.org"); cert=s.getpeercert(); print("TLS",s.version(),"ALPN",s.selected_alpn_protocol()); print("SAN",cert.get("subjectAltName")); ssl.match_hostname(cert,"wrong.example")'</code></pre>
+          <p><strong>예상:</strong> TLS connection과 trust validation은 먼저 성공하지만 마지막 hostname 비교가 <code>CertificateError</code>를 낸다. 이로써 “certificate 서명 유효”와 “요청 identity 일치”가 다른 검증임을 확인한다. Python version에 따라 <code>match_hostname</code> deprecation warning은 날 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · SNI failure와 cleanup (4분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>curl --connect-to wrong.example:443:www.rfc-editor.org:443 \
+  https://wrong.example/ -v -o /dev/null</code></pre>
+          <p>환경에 따라 TLS alert, wrong certificate/hostname 오류가 난다. shared edge의 default policy가 다를 수 있어 exact error text보다 ClientHello SNI와 failure phase를 본다. 파일이나 key를 만들지 않았으므로 cleanup은 없고 terminal에 secret이 출력되지 않았는지 확인한다.</p>
+          <p><strong>자주 나는 오류:</strong> <code>-tls1_3</code> 미지원이면 local TLS engine version을 확인하고 option을 빼서 negotiated version을 관찰한다. Corporate proxy가 있으면 peer certificate issuer와 remote IP가 달라질 수 있으므로 proxy 경계를 기록한다. DNS 실패는 TLS 전에 해결한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>TLS certificate는 data 암호화 key가 아니다.</strong> TLS 1.3 traffic key는 ephemeral shared secret과 transcript에서 파생된다.</li>
+            <li><strong>SNI와 Host/:authority는 계층·시점이 다르다.</strong> SNI는 HTTP 전에 certificate/tenant 선택, Host는 TLS 뒤 HTTP routing에 쓰인다.</li>
+            <li><strong>Certificate chain valid와 hostname valid는 다르다.</strong> 둘 중 하나라도 실패하면 intended server identity 검증 실패다.</li>
+            <li><strong>Root certificate는 server가 보내야 하는 chain의 마지막이라는 뜻이 아니다.</strong> Trust anchor는 보통 client trust store에 있다.</li>
+            <li><strong>인증서 갱신은 새 connection부터 보인다.</strong> 기존 TLS connection은 예전 handshake state를 유지하므로 connection drain과 rollout 관측이 필요하다.</li>
+            <li><strong>TLS termination 지점 뒤 traffic이 자동으로 보호되는 것은 아니다.</strong> LB→origin re-encryption/mTLS와 trust owner를 별도 설계한다.</li>
+            <li><strong>ALPN은 protocol을 선택할 뿐 구현 정상성을 보증하지 않는다.</strong> 선택한 parser와 actual bytes가 맞아야 한다.</li>
+            <li><strong>0-RTT는 일반 request와 같은 replay 보장이 아니다.</strong> Non-idempotent operation을 기본 허용하지 않는다.</li>
+            <li><strong>Packet capture만으로 TLS 1.3 certificate를 평문 확인할 수 없을 수 있다.</strong> ServerHello 뒤 handshake가 암호화되므로 endpoint logs와 안전한 key-log 정책이 필요하다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“TLS 1.3 full handshake를 packet 순서와 성공 경계로 설명하세요.”</strong><br>좋은 답변 구조: DNS/TCP 선행 → ClientHello(SNI·ALPN·key share) → ServerHello/shared secret/HKDF → encrypted certificate·CertificateVerify → path/SAN/time 검증 → Finished/transcript → application key/data → TCP/TLS/HTTP 성공 분리.</li>
+            <li><strong>“Certificate chain 서명은 유효한데 hostname mismatch가 발생했습니다. 왜이며 어떻게 복구합니까?”</strong><br>좋은 답변 구조: CA path와 service identity 분리 → requested hostname/SNI/SAN 증거 → default cert·LB route·wrong endpoint 가설 → 정상 cert/config canary → 검증 우회 금지 → fingerprint/edge 전체 확인.</li>
+            <li><strong>“대규모 서비스의 certificate rotation을 무중단으로 설계하세요.”</strong><br>좋은 답변 구조: termination/key owner → expiry SLO와 자동 issuance → old/new overlap → multi-region propagation → served-chain external probe → connection reuse/drain → canary·rollback → key compromise/revocation runbook.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>HTTP/2 stream window와 connection window가 동시에 필요한 이유는?</li>
+            <li>HTTP/2가 해결한 HOL과 해결하지 못한 HOL은?</li>
+            <li>RST_STREAM과 GOAWAY의 영향 범위 차이는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 개별 consumer와 전체 connection buffer를 각각 보호한다. ② HTTP/1.1 ordered response HOL은 줄이지만 TCP sequence loss HOL은 남는다. ③ RST_STREAM은 한 stream, GOAWAY는 connection drain과 last-stream-id 처리 범위를 알린다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>SNI, SAN hostname validation, ALPN의 owner와 시점을 각각 설명하라.</li>
+            <li>CertificateVerify와 Finished는 무엇을 각각 증명하는가?</li>
+            <li>TCP connect 성공 뒤 TLS handshake가 실패할 수 있는 가설을 네 가지 제시하라.</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Client가 ClientHello SNI로 server 설정 선택을 돕고, client verifier가 served certificate SAN과 intended hostname을 비교하며, client offer/server selection으로 상위 protocol을 정한다. ② 전자는 certificate private-key possession과 transcript signature, 후자는 handshake secret과 transcript의 key confirmation·integrity다. ③ Chain/trust, hostname/SNI, time/expiry, version/cipher/signature overlap, ALPN/policy, key mismatch 중 네 가지. 문항당 정의 1점, state/flow 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc8446.html" style="color:#0369a1;">RFC 8446 · TLS 1.3 handshake, key schedule, record protection</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc5280.html" style="color:#0369a1;">RFC 5280 · X.509 PKI certificate와 path validation</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc6066.html" style="color:#0369a1;">RFC 6066 · TLS Extensions, Server Name Indication</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc7301.html" style="color:#0369a1;">RFC 7301 · Application-Layer Protocol Negotiation</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 26</strong><br>
+            <span>QUIC/HTTP/3, stream-level loss recovery — UDP 위에서 QUIC이 TLS 1.3 handshake와 transport state를 결합하고, packet loss가 다른 stream의 delivery를 막지 않도록 packet number space와 stream offset을 분리하는 원리를 추적합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

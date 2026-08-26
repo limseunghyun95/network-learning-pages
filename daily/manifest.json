@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-25T09:10:42+09:00",
+  "updatedAt": "2026-08-26T09:09:21+09:00",
   "lessons": [
     {
       "day": 1,
@@ -221,6 +221,15 @@
       "path": "day-24.html",
       "kind": "lesson",
       "publishedAt": "2026-08-25T09:10:42+09:00"
+    },
+    {
+      "day": 25,
+      "week": 4,
+      "title": "TLS certificate chain, SNI, ALPN, handshake",
+      "summary": "TLS 1.3 ClientHello부터 certificate path·hostname·CertificateVerify·Finished·traffic key까지 추적하고 SNI/ALPN routing, rotation, termination과 handshake 장애를 진단합니다.",
+      "path": "day-25.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-26T09:09:21+09:00"
     }
   ]
 }
