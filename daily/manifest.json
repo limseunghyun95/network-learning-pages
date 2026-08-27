@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-26T09:09:21+09:00",
+  "updatedAt": "2026-08-27T09:18:32+09:00",
   "lessons": [
     {
       "day": 1,
@@ -230,6 +230,15 @@
       "path": "day-25.html",
       "kind": "lesson",
       "publishedAt": "2026-08-26T09:09:21+09:00"
+    },
+    {
+      "day": 26,
+      "week": 4,
+      "title": "QUIC/HTTP/3, stream-level loss recovery",
+      "summary": "QUIC packet number와 stream offset을 분리해 HTTP/3 손실을 stream별로 복구하는 원리와 shared congestion·flow control, migration, QPACK, UDP fallback 장애를 진단합니다.",
+      "path": "day-26.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-27T09:18:32+09:00"
     }
   ]
 }
