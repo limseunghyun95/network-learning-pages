@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 27</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">HTTP · TLS · QUIC · WEEK 4 / DAY 27 · INTEGRATION LAB</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">랩: curl -v --trace-time, certificate 오류</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">DNS→TCP→TLS→HTTP를 하나의 timestamp로 복원 · 개념 55분 + 실습 40분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            <code>curl -v --trace-time</code>의 event와 <code>--write-out</code>의 누적 milestone을 결합하면 DNS, connect, TLS, first byte를 분리할 수 있다. 인증서 오류는 “암호화가 안 됨” 하나가 아니라 <strong>trust path, 유효기간, reference identity와 SAN의 일치, SNI routing</strong> 중 어느 불변식이 깨졌는지 증거로 좁혀야 한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Verbose / trace</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;"><code>-v</code>는 connection과 protocol 대화를 사람이 읽기 좋게 보여준다. Trace는 더 자세한 송수신 기록이다. 둘 다 credential·cookie·body가 노출될 수 있어 공유 전 redaction이 필요하다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Timestamp</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Event가 관측된 시각. <code>--trace-time</code>은 curl의 verbose/trace 각 줄 앞에 시간을 붙인다. Packet capture·server log와 clock 기준이 다를 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Milestone</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">시작점부터 특정 단계 완료까지의 누적 시간. <code>time_namelookup</code>, <code>time_connect</code>, <code>time_appconnect</code>, <code>time_starttransfer</code>가 예다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Phase duration</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">인접 milestone 차이로 근사한 구간 시간. 새 direct connection이라면 TCP≈connect−DNS, TLS≈appconnect−connect지만 proxy·Happy Eyeballs·reuse가 있으면 해석이 달라진다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Reference identity</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client가 접속하려고 의도한 service 이름. URL의 hostname이나 명시적 설정에서 온다. DNS가 돌려준 IP와 동일 개념이 아니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Presented identity</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Server certificate의 subjectAltName에 표현된 DNS-ID/IP-ID 등. Client가 reference identity와 규칙에 따라 비교한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Trust anchor</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client trust store에서 신뢰의 시작점이 되는 CA certificate. Chain의 서명이 수학적으로 맞아도 신뢰 anchor에 닿지 않으면 검증 실패다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SAN</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Subject Alternative Name. 현대 TLS service identity의 typed identifier 위치다. 자유 형식 Common Name만 보고 hostname을 인증하면 안 된다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SNI / ALPN</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">SNI는 ClientHello에서 원하는 server name을 알려 certificate/virtual host 선택을 돕고, ALPN은 <code>h2</code>·<code>http/1.1</code> 같은 상위 protocol을 협상한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Exit code</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Process가 shell에 돌려주는 결과 코드. HTTP 500과 curl exit 0이 함께 가능하고, TLS verification 실패는 HTTP response 전에 non-zero가 될 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Deadline / timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Deadline은 전체 작업이 끝나야 하는 절대 경계, timeout은 특정 대기 한도다. Connect timeout만 설정해도 DNS·TLS·response 전체가 보호되는 것은 아니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Failure window</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">어느 성공 경계 뒤, 어느 성공 경계 전에 실패했는지 나타내는 구간. 예: TCP 성공 뒤 certificate verify 전 실패.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>“curl이 느리다”와 “SSL error다”는 증상이지 원인이 아니다. 대규모 서비스에서는 같은 URL도 resolver cache, IPv4/IPv6 race, proxy, connection reuse, edge certificate rollout, client trust store 때문에 서로 다른 path를 지난다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>장애 범위:</strong> DNS가 0.8초인지, TCP가 timeout인지, TLS verification이 실패했는지, server TTFB가 늦는지에 따라 owner와 안전한 조치가 완전히 다르다.</li>
+            <li><strong>보안:</strong> <code>-k</code>/<code>--insecure</code>로 성공했다고 원인이 해결된 것이 아니다. 그 실험은 “verification 계층이 blocker”라는 증거일 뿐 production 해법이 아니다.</li>
+            <li><strong>면접:</strong> 좋은 답변은 도구 이름보다 timeline, 상태 owner, 불변식, 반증 가능한 가설, rollback을 연결한다.</li>
+            <li><strong>실무:</strong> Retry 전에 request가 server/application에 도달했는지 모르면 중복 write를 만들 수 있다. Failure window를 알아야 idempotency 전략을 고른다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:17%;">시점</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:55%;">curl PROCESS → OS/NETWORK → EDGE/SERVER</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:28%;">증거·성공 경계</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① t0</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">URL parse → env proxy/no_proxy → resolver 요청</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>time_namelookup</code><br>reference identity 확정</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② t1</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">route/ARP·ND → SYN → SYN-ACK → ACK<br>또는 proxy CONNECT</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>time_connect</code><br>TCP socket established</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ t2</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">ClientHello: SNI + ALPN + key share<br>← ServerHello + Certificate + Verify + Finished</td><td style="padding:9px;border:1px solid #dbe3e8;">Chain·time·SAN 검증<br><code>time_appconnect</code></td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ failure</td><td style="padding:9px;border:1px solid #dbe3e8;background:#feecec;text-align:center;">unknown CA / expired / hostname mismatch<br>→ fatal TLS failure, HTTP request 미전송</td><td style="padding:9px;border:1px solid #dbe3e8;">Non-zero exit<br>appconnect 미완료</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ t3</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">TLS 성공 → HTTP request headers/body<br>Proxy/LB queue → application → response first byte</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>time_starttransfer</code><br>HTTP status/header</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑥ t4</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eaf7fc;text-align:center;">Response body → receive buffer → curl output<br>connection reuse/close</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>time_total</code><br>bytes·exit code</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>Control path:</strong> URL, proxy environment, DNS answer, route, SNI, trust store, ALPN이 실제 data path와 parser를 선택한다. Command에 기록하지 않으면 재현성이 사라진다.</li>
+            <li><strong>TCP 경계:</strong> Connect 완료는 peer process나 TLS identity를 보장하지 않는다. SYN-ACK을 보낸 지점이 LB일 수도 있다.</li>
+            <li><strong>TLS 경계:</strong> Client는 certificate path와 time policy를 검증하고 reference identity가 SAN의 typed identity와 일치하는지 확인한다. SNI로 certificate를 골랐다는 것과 hostname 검증 통과는 별도다.</li>
+            <li><strong>Failure window:</strong> Verification 실패라면 TCP는 성공했지만 authenticated channel은 만들어지지 않았고 정상 client는 HTTP request를 보내지 않는다. 따라서 application log 부재가 자연스럽다.</li>
+            <li><strong>HTTP 경계:</strong> First byte까지의 시간에는 proxy/LB queue, upstream pool 대기, application CPU/DB가 섞인다. Curl 하나만으로 server 내부 시간을 단정하지 않는다.</li>
+            <li><strong>완료 경계:</strong> Body 수신과 curl exit 0도 business transaction의 durable commit을 직접 증명하지 않는다. Request ID와 application/database evidence가 필요하다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>핵심 불변식:</strong> Authenticated TLS channel이 성립하려면 유효한 chain이 local trust anchor에 닿고, certificate validity/policy가 맞으며, reference identity가 presented SAN identity와 일치하고, handshake transcript 검증이 끝나야 한다. 하나라도 실패하면 HTTP로 넘어가지 않는다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">누적 milestone을 구간 시간으로 바꾸기</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">근사 구간</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">계산·해석</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">DNS</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>time_namelookup</code>. OS/libcurl cache와 resolver 경로에 따라 0에 가깝거나 재귀 질의 시간이 포함된다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">TCP</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>time_connect − time_namelookup</code>. 새 direct TCP의 근사치이며 proxy connect, IPv6/IPv4 race, queue가 섞일 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">TLS</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>time_appconnect − time_connect</code>. Handshake와 certificate verification을 포함한다. Reuse에서는 새 handshake가 없을 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Request→first byte</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>time_starttransfer − time_pretransfer</code>. Upload가 크면 last-byte-sent 시점과 다르므로 server 처리시간으로 그대로 부르면 안 된다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Body transfer</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>time_total − time_starttransfer</code>. Response size, congestion/flow control, client write 속도가 함께 영향을 준다.</td></tr>
+          </table>
+          <p>각 값은 curl 시작부터 누적된 application-level 관측이다. Packet timestamp와 직접 같지 않다. Curl log, packet capture, edge access log, application trace를 request ID·5-tuple·timestamp tolerance로 join해야 queue 위치를 더 정확히 찾을 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Certificate verification은 세 축이다</h3>
+          <ul style="padding-left:22px;">
+            <li><strong>Path:</strong> Leaf→intermediate→trust anchor의 signature와 constraints가 유효한가. 자체서명 leaf를 기본 trust store가 모르면 unknown CA다.</li>
+            <li><strong>Time/policy:</strong> Client clock이 validity interval 안이고 key usage·algorithm 정책을 만족하는가. Clock drift는 certificate 교체만으로 고쳐지지 않는다.</li>
+            <li><strong>Identity:</strong> URL에서 얻은 reference DNS name/IP가 SAN의 같은 typed identifier와 일치하는가. DNS name용 certificate를 IP URL에 쓴다고 자동 일치하지 않는다.</li>
+          </ul>
+
+          <h3 style="font-size:18px;color:#075985;">SNI, DNS, Host는 같은 이름처럼 보여도 owner가 다르다</h3>
+          <p><code>--resolve</code>는 curl 내부의 hostname→IP 선택을 고정하지만 URL hostname은 유지한다. 그래서 SNI, TLS reference identity, HTTP Host/:authority는 <code>wrong.example</code>로 두고 packet destination만 127.0.0.1로 만들 수 있다. 반대로 IP URL은 reference identity도 IP가 되어 DNS SAN certificate와 mismatch가 난다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Timeout과 retry의 상태기계</h3>
+          <p>DNS/connect/TLS/request의 남은 budget을 하나의 end-to-end deadline 아래 둔다. Certificate mismatch처럼 deterministic한 policy failure는 같은 endpoint에 즉시 retry해도 고쳐지지 않는다. Timeout 뒤에는 server가 request를 받았을 가능성을 failure window로 판단하고, write라면 idempotency key와 status lookup 없이 맹목 재시도하지 않는다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">재현 command</td><td style="padding:9px;border:1px solid #dbe3e8;">Timestamp, curl/version TLS backend, URL, IP family, proxy/no_proxy, DNS override, timeout을 기록한다. Secret header와 body는 제거한 최소 재현본을 만든다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">측정 표본</td><td style="padding:9px;border:1px solid #dbe3e8;">Cold/new connection과 reused connection, IPv4/IPv6, region/ISP를 분리한다. 단일 curl 결과를 p99나 fleet 상태로 일반화하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">TLS 증거</td><td style="padding:9px;border:1px solid #dbe3e8;">Served leaf fingerprint, SAN, issuer, validity, chain, SNI, selected ALPN, client trust store와 clock을 함께 본다. Secret/private key는 수집하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">검증 우회</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>-k</code>는 제한된 진단 비교에서만 쓰고 결과를 authenticated success라 부르지 않는다. Production fix는 올바른 chain/SAN/clock/trust bundle 복구다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Timeout budget</td><td style="padding:9px;border:1px solid #dbe3e8;">Connect와 전체 timeout을 분리하되 상위 deadline을 넘지 않게 한다. Retry 횟수×per-attempt timeout+backoff가 caller deadline을 초과하지 않도록 계산한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Retry 분류</td><td style="padding:9px;border:1px solid #dbe3e8;">Hostname/unknown CA/expired는 retry 대상이 아니다. Transient connect/reset/5xx만 bounded backoff+jitter와 idempotency 조건으로 제한한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Certificate rollout</td><td style="padding:9px;border:1px solid #dbe3e8;">Old/new overlap, region canary, served-chain external probe, rollback artifact를 둔다. Config 배포 성공 대신 실제 listener가 제공하는 certificate를 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">관측성</td><td style="padding:9px;border:1px solid #dbe3e8;">DNS/connect/TLS/TTFB/total histogram, curl/SDK error class, TLS alert, SNI/ALPN, fingerprint/notAfter, remote IP, proxy, request ID를 cardinality·privacy budget 안에서 수집한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> curl build의 TLS backend가 SecureTransport, OpenSSL, LibreSSL, Schannel 등 무엇인지에 따라 trust store, error text, revocation과 지원 option이 다르다. 최신 curl man page의 변수 중 현재 local curl에 없는 항목도 있으므로 먼저 <code>curl -V</code>와 <code>curl -w '%{json}'</code> 지원 여부를 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">Curl exit 60, unknown CA/expired/hostname mismatch, 특정 region·runtime만 실패, appconnect 미완료, TLS p99 급증, <code>-k</code>에서는 연결되지만 정상 검증에서는 실패.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">UTC/KST timestamp, curl/version/TLS backend, URL reference identity, DNS/remote IP/proxy, SNI·ALPN, served leaf/chain/SAN/issuer/validity/fingerprint, client clock/trust store, verbose failure line, timing milestone, edge rollout version.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">Intermediate 누락, unknown private CA, expired/not-yet-valid, wrong SAN, SNI/default certificate route, partial edge rollout, client clock drift, stale trust bundle, TLS policy/algorithm mismatch, HTTPS proxy가 별도 certificate를 제시.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">영향 fingerprint·edge·runtime을 특정하고 정상 certificate bundle/listener로 canary route한다. 새 handshake만 정상 edge로 옮기고 기존 정상 connection은 보존한다. Client verification은 유지한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 유효 certificate/chain/SNI route/trust bundle로 rollback하고 모든 edge에서 fresh connection의 SAN·chain·fingerprint·appconnect·HTTP success를 확인한다. Clock 문제는 NTP를 복구한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>-k</code>/trust-all 배포, hostname verification 제거, 전체 edge 동시 재시작, private key/authorization header가 든 trace 공유, certificate failure 무한 retry, client system clock을 임의 변경하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 40분 실습: public timing + local certificate failure</h2>
+          <p><strong>사전 조건:</strong> macOS/Linux shell, <code>curl</code>, <code>openssl</code>, loopback port 18443. Corporate proxy를 피하려고 local 명령에 <code>--noproxy '*'</code>를 사용한다. 실행 전 각 단계의 exit code와 HTTP request 도달 여부를 예측한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 도구와 public baseline (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>curl -V
+curl -v --trace-time --max-time 10 -o /dev/null \
+  -w 'ip=%{remote_ip} code=%{http_code} http=%{http_version}\ndns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} pre=%{time_pretransfer} first=%{time_starttransfer} total=%{time_total}\n' \
+  https://www.rfc-editor.org/</code></pre>
+          <p><strong>예상:</strong> DNS address, TCP 연결, TLS backend/verification, ALPN과 HTTP response가 시간순으로 보인다. Milestone은 누적값이다. Trace에 cookie/token이 있으면 저장·공유하지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · 격리된 자체서명 server 준비 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>LAB_DIR=$(mktemp -d /tmp/network-day27.XXXXXX)
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -keyout "$LAB_DIR/key.pem" -out "$LAB_DIR/cert.pem" \
+  -subj '/CN=wrong.example' \
+  -addext 'subjectAltName=DNS:wrong.example'
+
+openssl s_server -quiet -accept 18443 \
+  -cert "$LAB_DIR/cert.pem" -key "$LAB_DIR/key.pem" -www \
+  &gt;"$LAB_DIR/server.log" 2&gt;&amp;1 &amp;
+LAB_PID=$!
+sleep 1</code></pre>
+          <p>Private key는 임시 directory 밖으로 복사하지 않는다. <code>-addext</code> 미지원이면 local OpenSSL/LibreSSL help를 확인하고 SAN config 방식으로 대체한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · 실패 주입 A: unknown CA (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>curl -v --trace-time --noproxy '*' --max-time 5 \
+  https://wrong.example:18443/ \
+  --resolve wrong.example:18443:127.0.0.1
+printf 'exit=%s\n' "$?"</code></pre>
+          <p><strong>예상:</strong> TCP와 TLS bytes 교환은 시작되지만 local trust store가 self-signed leaf를 trust anchor로 받아들이지 않아 non-zero로 끝난다. 정상 curl은 HTTP request를 보내지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입 B: trust 성공, identity 실패 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>curl -v --trace-time --noproxy '*' --max-time 5 \
+  --cacert "$LAB_DIR/cert.pem" \
+  https://127.0.0.1:18443/
+printf 'exit=%s\n' "$?"</code></pre>
+          <p><strong>예상:</strong> 이제 signing certificate는 명시적으로 trust했지만 reference identity는 IP 127.0.0.1이고 certificate SAN은 DNS <code>wrong.example</code>라 hostname/IP mismatch가 난다. Path trust와 service identity가 별도임을 증명한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · 두 불변식을 만족시켜 성공 (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>curl -v --trace-time --noproxy '*' --max-time 5 \
+  --cacert "$LAB_DIR/cert.pem" \
+  --resolve wrong.example:18443:127.0.0.1 \
+  https://wrong.example:18443/ -o /dev/null \
+  -w 'code=%{http_code} connect=%{time_connect} tls=%{time_appconnect} total=%{time_total}\n'</code></pre>
+          <p><strong>예상:</strong> Local trust와 SAN identity가 모두 맞아 TLS가 끝나고 HTTP 200이 온다. <code>--resolve</code>는 destination IP만 고정하면서 URL hostname/SNI/reference identity를 유지한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">5단계 · cleanup과 사후 확인 (4분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>kill "$LAB_PID"
+wait "$LAB_PID" 2&gt;/dev/null || true
+rm -f "$LAB_DIR/key.pem" "$LAB_DIR/cert.pem" "$LAB_DIR/server.log"
+rmdir "$LAB_DIR"</code></pre>
+          <p><strong>자주 나는 오류:</strong> 18443 사용 중이면 다른 high port로 command 전체를 바꾼다. Proxy error면 <code>--noproxy '*'</code>가 적용됐는지 본다. Connection refused면 server process/log부터 확인한다. Exit 60의 문구는 TLS backend마다 다를 수 있어 exact string보다 trust/identity failure phase를 기록한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong><code>--trace-time</code>만으로 packet timestamp가 되지 않는다.</strong> Curl process가 본 event 시각이며 kernel queue와 server 내부 queue는 별도다.</li>
+            <li><strong>Milestone은 구간 시간이 아니라 누적 시간이다.</strong> 차를 계산하되 reuse·proxy·redirect·Happy Eyeballs 전제를 함께 적는다.</li>
+            <li><strong>HTTP status와 curl exit code는 다른 축이다.</strong> HTTP 500도 정상 transport라 exit 0일 수 있고 TLS failure는 status 자체가 없다.</li>
+            <li><strong>CN만 맞는 certificate를 현대 hostname 검증의 정답으로 보지 않는다.</strong> Typed SAN identity를 확인한다.</li>
+            <li><strong><code>--resolve</code>는 /etc/hosts 영구 변경이 아니다.</strong> 해당 curl process의 address 선택만 바꾸며 URL hostname 의미는 유지한다.</li>
+            <li><strong>SNI가 맞아도 SAN mismatch일 수 있다.</strong> Server certificate 선택과 client identity 검증은 다른 state transition이다.</li>
+            <li><strong><code>-k</code> 성공은 안전한 성공이 아니다.</strong> On-path attacker도 통과시키므로 production health check에 넣지 않는다.</li>
+            <li><strong>Verbose log에는 secret이 섞일 수 있다.</strong> Authorization, Cookie, query, response body와 internal hostname을 redaction한다.</li>
+            <li><strong>Client clock을 빼먹지 않는다.</strong> Not-yet-valid/expired가 server rollout이 아니라 clock drift일 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“HTTPS 요청이 2초 걸립니다. curl 하나로 어디까지 분해하고 무엇은 단정하지 않겠습니까?”</strong><br>좋은 답변 구조: version/proxy/reuse 전제 → 누적 DNS/connect/appconnect/pretransfer/starttransfer/total → 차이 계산 → verbose event와 remote IP/ALPN → server 내부 queue는 trace/request ID로 보완 → 반복 표본/p99.</li>
+            <li><strong>“<code>-k</code>에서는 성공하고 정상 curl은 hostname mismatch입니다. 원인과 복구는?”</strong><br>좋은 답변 구조: encryption과 authentication 분리 → URL reference identity·SNI·served SAN/fingerprint 증거 → default cert/SNI route/잘못된 endpoint 가설 → 올바른 cert/route canary → 검증 우회 금지 → edge 전체 fresh handshake 확인.</li>
+            <li><strong>“Certificate rotation을 다중 region에서 무중단으로 운영하고 실패를 진단하세요.”</strong><br>좋은 답변 구조: termination/key owner → issuance와 old/new overlap → chain/SAN/notAfter/fingerprint external probe → region canary → connection reuse/drain → rollback artifact → client trust/clock/engine 차이와 success SLO.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>QUIC에서 lost packet과 lost stream data를 왜 같은 식별자로 재전송하지 않는가?</li>
+            <li>한 stream의 loss가 다른 stream delivery를 막지 않아도 함께 느려질 수 있는 공유 상태는?</li>
+            <li>Alt-Svc 광고와 실제 HTTP/3 협상 성공은 왜 다른 증거인가?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Packet number는 ACK/loss timeline이고 stream offset은 application byte 위치라 lost 정보가 새 PN에 재구성된다. ② Congestion window, connection flow-control, CPU/NIC queue, QPACK dependency다. ③ 광고는 시도 가능한 alternative control data일 뿐 client capability·UDP path·handshake·negotiated version을 보장하지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li><code>time_appconnect − time_connect</code>를 TLS 시간으로 부를 때 명시할 전제 세 가지는?</li>
+            <li>자체서명 certificate를 <code>--cacert</code>로 trust한 뒤에도 IP URL에서 실패하는 이유는?</li>
+            <li>Certificate 오류 incident에서 application log가 없을 때 어떤 failure window를 먼저 검증할 것인가?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 새 connection, direct path/proxy 여부, reuse·redirect·IP race와 curl/TLS backend를 명시한다. ② Path trust는 통과해도 reference IP 127.0.0.1과 presented DNS SAN wrong.example의 type/value가 다르다. ③ TCP connect 뒤 TLS chain/time/identity 검증 전 실패인지 timestamp·SNI·served cert·exit code로 본다. 문항당 정의 1점, state/flow 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://curl.se/docs/manpage.html" style="color:#0369a1;">curl 공식 man page · verbose, trace-time, write-out timing, TLS options</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc8446.html" style="color:#0369a1;">RFC 8446 · TLS 1.3 handshake, certificate, fatal alerts</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9525.html" style="color:#0369a1;">RFC 9525 · TLS application service identity와 SAN matching</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc5280.html" style="color:#0369a1;">RFC 5280 · X.509 certificate path validation</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 28</strong><br>
+            <span>회상: 암호화·인증·무결성 경계 — HTTP/1.1·HTTP/2·HTTP/3, TLS, certificate, SNI/ALPN의 상태 owner와 failure window를 백지에서 복원하고 대기업 면접식 incident drill로 Week 4를 마무리합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

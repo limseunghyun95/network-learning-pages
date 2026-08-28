@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-27T09:18:32+09:00",
+  "updatedAt": "2026-08-28T09:19:15+09:00",
   "lessons": [
     {
       "day": 1,
@@ -239,6 +239,15 @@
       "path": "day-26.html",
       "kind": "lesson",
       "publishedAt": "2026-08-27T09:18:32+09:00"
+    },
+    {
+      "day": 27,
+      "week": 4,
+      "title": "랩: curl -v --trace-time, certificate 오류",
+      "summary": "curl timestamp와 누적 timing을 결합해 DNS·TCP·TLS·HTTP failure window를 분해하고 자체서명 CA·SAN mismatch를 안전하게 재현하는 통합 랩입니다.",
+      "path": "day-27.html",
+      "kind": "lab",
+      "publishedAt": "2026-08-28T09:19:15+09:00"
     }
   ]
 }
