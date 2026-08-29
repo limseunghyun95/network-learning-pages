@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-28T09:19:15+09:00",
+  "updatedAt": "2026-08-29T09:20:38+09:00",
   "lessons": [
     {
       "day": 1,
@@ -248,6 +248,15 @@
       "path": "day-27.html",
       "kind": "lab",
       "publishedAt": "2026-08-28T09:19:15+09:00"
+    },
+    {
+      "day": 28,
+      "week": 4,
+      "title": "회상: 암호화·인증·무결성 경계",
+      "summary": "TLS의 기밀성·무결성·인증을 connection endpoint별로 분해하고 HTTP/1.1·2·3, LB termination, upstream와 application authorization의 보장·실패 경계를 복원하는 Week 4 리뷰입니다.",
+      "path": "day-28.html",
+      "kind": "review",
+      "publishedAt": "2026-08-29T09:20:38+09:00"
     }
   ]
 }

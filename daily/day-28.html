@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 28</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">HTTP · TLS · QUIC · WEEK 4 / DAY 28 · REVIEW</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">회상: 암호화·인증·무결성 경계</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">“HTTPS니까 안전”을 hop·state·owner 단위로 해체 · 개념 60분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            암호화는 내용을 숨기고, 무결성은 변경을 탐지하며, 인증은 상대 identity를 검증한다. TLS는 이 속성을 <strong>한 TLS connection의 두 endpoint 사이</strong>에 제공할 뿐 DNS·LB 뒤 upstream·application authorization·database commit까지 자동 확장하지 않는다. 따라서 termination마다 새로운 trust와 failure 경계를 그려야 한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Confidentiality</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">기밀성. 허가되지 않은 관찰자가 data 내용을 알기 어렵게 하는 속성. TLS도 packet 길이·시점·IP 같은 모든 metadata를 숨기지는 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Integrity</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">무결성. 전송 중 data가 바뀌면 수신자가 탐지할 수 있는 속성. TCP checksum은 우발 오류용이지 공격자에 대한 cryptographic integrity가 아니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Authentication</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">인증. 상대가 주장한 identity를 증거로 확인하는 절차. Server certificate path와 hostname 검증은 server authentication의 일부다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Authorization</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">인가. 인증된 주체가 어떤 resource/action을 수행할 수 있는지 결정한다. TLS server 인증이 사용자에게 결제 권한을 주지는 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Endpoint / hop</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Endpoint는 security protocol이 끝나는 주체, hop은 두 인접 endpoint 사이 구간이다. Client→LB와 LB→app은 별도 connection·key·certificate·timeout을 가진다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">TLS termination</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">TLS record를 복호화해 plaintext를 얻는 지점. 이 지점은 private key, peer identity, log/redaction, 다음 hop 보호의 owner가 된다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Trust boundary</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">다른 권한·위협·운영 owner로 넘어가는 경계. Network segment 이름이 아니라 “누가 plaintext·key·정책을 제어하는가”로 그린다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">AEAD</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Authenticated Encryption with Associated Data. 암호화와 변조 탐지를 함께 제공하며 record header 일부를 associated data로 묶는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Certificate path</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Leaf에서 intermediate CA를 거쳐 local trust anchor까지 이어지는 서명·constraint 검증 경로. Name match와는 별도 축이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SNI / ALPN</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">SNI는 TLS server name/certificate route 선택, ALPN은 HTTP/2·HTTP/1.1 같은 상위 protocol 선택에 쓰는 handshake control data다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Reliability</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">손실·중복·순서를 다뤄 application에 ordered bytes/stream을 제공하는 속성. TCP/QUIC reliability와 TLS security는 서로 대체하지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Success boundary</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">어떤 component가 무엇을 확정한 시점. DNS answer, TCP ACK, TLS Finished, HTTP response, DB commit은 각각 다른 성공이다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>“HTTPS를 쓴다”는 말만으로 실제 보안 속성을 알 수 없다. Edge에서 TLS를 끝내고 origin까지 plaintext라면 외부 hop은 보호되지만 내부 hop은 그렇지 않다. Certificate가 유효해도 application authorization이 틀리면 data leak가 발생하고, HTTP 200이어도 durable commit은 실패할 수 있다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Threat model:</strong> Passive observer, active on-path attacker, compromised proxy, malicious client, insider는 서로 다른 통제가 필요하다.</li>
+            <li><strong>Incident:</strong> TLS handshake failure를 application retry로 덮으면 해결되지 않고 handshake CPU와 queue만 늘어난다.</li>
+            <li><strong>Architecture:</strong> Connection pool을 재사용하는 LB는 client connection과 upstream connection을 1:1로 묶지 않는다. Identity·timeout·trace owner도 분리된다.</li>
+            <li><strong>면접:</strong> 대기업 수준 답변은 “TLS가 안전하다”가 아니라 보호 대상, endpoint, key owner, 보장하지 않는 것, failure/rollback을 명시한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:17%;">단계</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:53%;">CLIENT → NETWORK → EDGE LB → APP → DB</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:30%;">owner·보장</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① Name</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">DNS A/AAAA → destination IP<br>URL hostname은 reference identity</td><td style="padding:9px;border:1px solid #dbe3e8;">Resolver/cache<br>일반 DNS는 TLS 아님</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② Transport</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">Route/ARP·ND/NAT → TCP connection<br>또는 UDP 위 QUIC connection</td><td style="padding:9px;border:1px solid #dbe3e8;">Kernel/QUIC endpoint<br>reliability·congestion</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ Front TLS</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">ClientHello(SNI·ALPN) ↔ Edge certificate/Finished<br><strong>encrypted tunnel A ends at LB</strong></td><td style="padding:9px;border:1px solid #dbe3e8;">LB owns private key<br>C/I/server auth</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ HTTP</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">LB decrypts → method/header/body parse<br>route·authn token·rate limit·WAF</td><td style="padding:9px;border:1px solid #dbe3e8;">L7 policy owner<br>plaintext exists</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ Upstream</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">Pool에서 LB→App connection 선택<br><strong>optional TLS/mTLS tunnel B</strong></td><td style="padding:9px;border:1px solid #dbe3e8;">별도 SNI·cert·key<br>pool queue·timeout</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑥ Commit</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">App authorization → transaction → DB commit<br>response → reverse path</td><td style="padding:9px;border:1px solid #dbe3e8;">Application/DB owner<br>business success</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>DNS:</strong> IP를 찾는 control path와 service identity 검증을 구분한다. 공격자가 IP를 바꿔도 정상 TLS hostname validation이 통과하지 않으면 authenticated connection은 막힌다.</li>
+            <li><strong>Transport:</strong> TCP sequence/ACK 또는 QUIC stream recovery가 delivery reliability를 만든다. 이것만으로 peer identity나 cryptographic integrity를 얻지 못한다.</li>
+            <li><strong>Front TLS:</strong> Edge가 certificate private key를 소유하고 plaintext를 얻으므로 client가 인증한 peer는 origin app이 아니라 edge termination endpoint일 수 있다.</li>
+            <li><strong>HTTP policy:</strong> TLS 인증 뒤에도 bearer token/session/mTLS identity를 application principal로 mapping하고 resource authorization을 별도로 결정한다.</li>
+            <li><strong>Upstream:</strong> Re-encryption을 하면 새 handshake와 새 trust policy다. Front certificate 성공은 backend certificate·hostname·mTLS 성공을 보장하지 않는다.</li>
+            <li><strong>Commit:</strong> Transport ACK는 peer socket 수신, HTTP status는 application 응답, DB commit은 durable state의 경계다. Timeout retry는 이 차이를 고려해야 한다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>백지 복원 규칙:</strong> 모든 화살표마다 ① protocol, ② connection owner, ③ plaintext가 보이는 곳, ④ peer identity 검증 주체, ⑤ key/trust store owner, ⑥ timeout/retry, ⑦ 성공 확정 시점을 적는다. 하나라도 답하지 못하면 “end-to-end secure”라고 단정하지 않는다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">보안 속성은 protocol stack마다 다르다</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">계층</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:38%;">제공하는 핵심</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">제공하지 않는 것</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">IP/Ethernet</td><td style="padding:9px;border:1px solid #dbe3e8;">Hop 전달, address와 forwarding</td><td style="padding:9px;border:1px solid #dbe3e8;">기본적으로 end-to-end 기밀성·peer 인증 없음</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">TCP</td><td style="padding:9px;border:1px solid #dbe3e8;">Ordered reliable byte stream, flow/congestion control</td><td style="padding:9px;border:1px solid #dbe3e8;">공격자에 대한 기밀성·identity·cryptographic integrity 없음</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">TLS 1.3</td><td style="padding:9px;border:1px solid #dbe3e8;">Handshake peer auth/key establishment, protected record의 기밀성·무결성</td><td style="padding:9px;border:1px solid #dbe3e8;">Traffic length/timing 은닉, application 인가, DB commit 보장 없음</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">HTTP</td><td style="padding:9px;border:1px solid #dbe3e8;">Method/status/header/content semantics와 routing metadata</td><td style="padding:9px;border:1px solid #dbe3e8;">TLS 없이 자체 기밀성·server identity를 자동 제공하지 않음</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Application</td><td style="padding:9px;border:1px solid #dbe3e8;">User/service authn, authorization, validation, transaction/idempotency</td><td style="padding:9px;border:1px solid #dbe3e8;">아래 hop 보호가 없으면 network plaintext 노출을 막지 못함</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">TLS handshake가 세 속성을 묶는 방식</h3>
+          <p>ClientHello/ServerHello가 version·cipher·key share를 정하고 transcript가 negotiation을 묶는다. Certificate path와 SAN은 public key를 intended server identity에 연결하고 CertificateVerify는 private-key possession과 transcript signature를 확인한다. Finished는 derived secret과 transcript를 확인한다. 이후 방향별 traffic key와 nonce로 AEAD record를 보호한다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>암호화 key 생성만으로 인증은 아니다.</strong> 공격자와도 key agreement는 가능하므로 certificate identity 검증이 필요하다.</li>
+            <li><strong>인증만으로 application 권한은 아니다.</strong> Server가 진짜라고 사용자의 account/action이 허용되는 것은 아니다.</li>
+            <li><strong>무결성 failure는 복구 가능한 bit error가 아니다.</strong> AEAD tag/Finished 검증 실패 시 connection을 종료하고 secret을 폐기해야 한다.</li>
+          </ul>
+
+          <h3 style="font-size:18px;color:#075985;">HTTP/1.1, HTTP/2, HTTP/3의 공통점과 차이</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:20%;">버전</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:40%;">Framing·multiplex</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">Loss·security 경계</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">HTTP/1.1</td><td style="padding:9px;border:1px solid #dbe3e8;">Text message framing, keep-alive; pipelining response order 제약</td><td style="padding:9px;border:1px solid #dbe3e8;">TCP byte stream HOL; HTTPS면 별도 TLS connection</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">HTTP/2</td><td style="padding:9px;border:1px solid #dbe3e8;">Binary frame와 stream multiplex, stream+connection flow control</td><td style="padding:9px;border:1px solid #dbe3e8;">한 TCP sequence gap이 모든 stream delivery를 막을 수 있음; TLS 경계는 connection endpoint</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">HTTP/3</td><td style="padding:9px;border:1px solid #dbe3e8;">HTTP semantics를 QUIC request/control/QPACK stream에 mapping</td><td style="padding:9px;border:1px solid #dbe3e8;">Stream별 loss recovery, shared cwnd/flow state는 남음; QUIC에 TLS 1.3 결합</td></tr>
+          </table>
+          <p>세 버전은 method/status/header 같은 HTTP semantics를 공유한다. Version을 바꿔도 authentication·authorization·idempotency 요구가 사라지지 않는다. 반대로 transport framing 차이는 queue, failure scope, observability 도구를 바꾼다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">성공 상태는 단조롭게 쌓이지 않을 수 있다</h3>
+          <p>DNS cache가 성공한 뒤 route가 바뀔 수 있고, TLS가 성공한 connection도 idle timeout으로 닫힐 수 있으며, HTTP response가 유실된 뒤 server transaction은 commit됐을 수 있다. 각 component는 자기 state만 안다. Exactly-once를 network ACK로 만들 수 없고 idempotency key·deduplication·transaction status 조회가 필요하다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">보안 경계 문서화</td><td style="padding:9px;border:1px solid #dbe3e8;">각 hop의 TLS endpoint, private-key/trust-store owner, plaintext 위치, SNI/SAN, authorization owner를 architecture와 runbook에 적는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Edge→origin 보호</td><td style="padding:9px;border:1px solid #dbe3e8;">Network trust만 가정하지 말고 threat model에 따라 TLS/mTLS와 workload identity를 사용한다. Front TLS 성공을 upstream 신뢰로 재사용하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Certificate lifecycle</td><td style="padding:9px;border:1px solid #dbe3e8;">Issuance·rotation·revocation·old/new overlap·rollback을 자동화하고 실제 listener의 chain/SAN/fingerprint/notAfter를 외부 probe한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Protocol rollout</td><td style="padding:9px;border:1px solid #dbe3e8;">H2/H3 negotiation과 fallback을 client/network cohort별 측정한다. Version만 보고 성능 개선을 단정하지 않고 loss·cwnd·flow/QPACK blocking을 함께 본다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Timeout·retry</td><td style="padding:9px;border:1px solid #dbe3e8;">DNS/connect/TLS/request/pool timeout을 end-to-end deadline 안에 배분한다. Deterministic auth failure는 retry하지 않고 transient failure도 bounded backoff+jitter를 쓴다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Backpressure</td><td style="padding:9px;border:1px solid #dbe3e8;">Connection/stream/queue limit와 load shedding을 둔다. TLS handshake storm, unlimited H2/H3 streams, unbounded retry가 memory·CPU를 고갈시키지 않게 한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">Remote IP, SNI/ALPN, TLS version/fingerprint, negotiated HTTP, DNS/connect/TLS/TTFB, pool wait, request ID, app/DB result를 join하되 key/token/body는 redaction한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">검증 우회</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>-k</code>, trust-all, hostname verification off를 production workaround로 금지한다. 진단 비교를 했다면 scope·duration·결론을 명시한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> Browser, curl TLS backend, JVM, proxy/LB는 trust store, ALPN, TLS policy, HTTP/3, retry와 error text가 다르다. RFC가 정의한 불변식과 제품의 구현/기본값을 분리하고 target runtime·region·network에서 canary한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">외부 HTTPS는 성공하지만 origin은 plaintext/timeout, 특정 SNI만 wrong certificate, H2/H3 cohort별 오류, auth 401/403 급증, retry 뒤 중복 transaction, TLS/HTTP p99와 queue 동시 증가.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">Timestamp·request/idempotency ID, client/runtime/network, DNS/remote IP, front/upstream connection IDs, SNI·ALPN·cert fingerprint, negotiated HTTP, TLS alert, DNS/connect/TLS/TTFB/pool wait, proxy route, app authn/authz와 DB commit 상태.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">Edge certificate/SNI rollout, upstream trust/SAN mismatch, ALPN/parser mismatch, UDP/H3 fallback, TCP/QUIC loss·flow block, connection pool exhaustion, proxy authorization/header 손실, deadline 역전, retry storm, app/DB partial failure.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">성공한 마지막 경계와 실패한 첫 경계를 특정하고 영향 SNI/version/edge를 canary 격리한다. Fallback·정상 route·직전 cert/policy로 신규 traffic을 제한 전환하고 기존 정상 connection은 drain한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 listener/upstream TLS/ALPN/route/timeout 설정으로 rollback, fresh connection으로 각 hop identity와 HTTP/app/DB 결과를 검증, queue·retry·error budget이 baseline으로 돌아온 뒤 cohort별 재확대한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">TLS 검증 해제, 모든 hop을 한 connection처럼 가정, 전체 LB 동시 재시작, 무한 retry/stream/window 확대, packet ACK를 business commit으로 간주, secret 포함 trace 공유, 증거 없이 HTTP version만 강제하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: 보안 경계 백지 복원과 failure drill</h2>
+          <p><strong>사전 조건:</strong> <code>curl</code>, <code>openssl</code>, 인터넷 연결. RFC Editor만 호출한다. 실행 전 종이에 Client→DNS→TCP→TLS→HTTP→Edge를 그리고 각 단계의 “보장/미보장/owner”를 먼저 쓴다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 예측표 작성 (5분)</h3>
+          <p>HTTP/1.1과 HTTP/2 각각에 대해 transport, framing, multiplexing, TLS endpoint, loss 영향, 성공 증거를 한 줄씩 적는다. “HTTPS”를 protocol 한 칸으로 쓰지 말고 HTTP와 TLS를 분리한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · 같은 semantics, 다른 framing 협상 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>curl -sS -o /dev/null --http1.1 \
+  -w 'forced=h1 negotiated=%{http_version} code=%{http_code} tls=%{time_appconnect}\n' \
+  https://www.rfc-editor.org/
+
+curl -sS -o /dev/null --http2 \
+  -w 'offered=h2 negotiated=%{http_version} code=%{http_code} tls=%{time_appconnect}\n' \
+  https://www.rfc-editor.org/</code></pre>
+          <p><strong>예상:</strong> 둘 다 같은 HTTP status semantics를 쓰지만 negotiated version은 1.1과 2로 갈린다. <code>--http2</code>는 TLS ALPN 협상을 허용하며 build가 HTTP/2를 지원해야 한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · TLS identity와 ALPN 증거 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>printf '' | openssl s_client \
+  -connect www.rfc-editor.org:443 \
+  -servername www.rfc-editor.org \
+  -alpn h2,http/1.1 2&gt;&amp;1 | \
+  grep -E 'Protocol|Cipher|ALPN|subject=|issuer=|Verify return code'</code></pre>
+          <p><strong>예상:</strong> Certificate subject/issuer, verify 결과, TLS version/cipher와 ALPN이 보인다. Engine별 출력 형식은 다르다. “Cipher가 있다”와 “hostname identity 검증 완료”를 같은 주장으로 쓰지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입: destination은 같고 SNI/reference identity만 변경 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>curl --noproxy '*' --max-time 8 -v \
+  --connect-to wrong.example:443:www.rfc-editor.org:443 \
+  https://wrong.example/ -o /dev/null
+printf 'exit=%s\n' "$?"</code></pre>
+          <p><strong>예상:</strong> TCP destination은 RFC Editor edge지만 ClientHello SNI와 reference identity는 <code>wrong.example</code>다. Edge 정책에 따라 TLS handshake alert 또는 certificate hostname mismatch로 실패한다. Exact 문구보다 “TCP 성공 뒤, authenticated TLS/HTTP 전”이라는 failure window를 기록한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · 6경계 판정표 완성 (6분)</h3>
+          <p>각 명령에 대해 DNS, TCP, TLS key agreement, certificate identity, ALPN/HTTP, application response를 성공/실패/미관측으로 표시한다. 그다음 “<code>-k</code>로 바꾸지 않고 어디를 복구해야 하는가?”를 SNI route/certificate SAN/trust 관점으로 답한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Cleanup과 자주 나는 오류</h3>
+          <p>파일·route·trust store를 바꾸지 않았으므로 cleanup은 없다. HTTP/2 미지원이면 <code>curl -V</code>의 Features를 확인한다. Corporate proxy가 있으면 <code>--noproxy</code> 유무와 proxy certificate를 기록한다. <code>s_client</code> 출력이 다르면 grep 없이 전체 header를 읽되 certificate/private data를 외부에 올리지 않는다. Wrong SNI가 예상과 다른 certificate를 내는 것은 shared edge policy 차이이지 실습 실패가 아니다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>암호화와 인증은 같은 단어가 아니다.</strong> Key agreement 성공 뒤에도 certificate identity가 틀리면 공격자와 안전하게 암호화한 꼴이 될 수 있다.</li>
+            <li><strong>무결성과 신뢰할 수 있는 내용은 다르다.</strong> TLS는 peer가 보낸 bytes의 변조를 막지만 peer가 거짓 data를 보내는 것은 막지 않는다.</li>
+            <li><strong>TLS termination 뒤는 자동으로 보호되지 않는다.</strong> Upstream hop마다 새 TLS/mTLS·identity·authorization을 설계한다.</li>
+            <li><strong>HTTP/2 multiplexing이 TCP loss HOL을 없애지 않는다.</strong> HTTP/3도 shared congestion/flow/QPACK dependency는 남는다.</li>
+            <li><strong>SNI와 Host/:authority는 시점과 owner가 다르다.</strong> SNI는 TLS 선택, Host는 TLS 뒤 HTTP routing이다.</li>
+            <li><strong>Connection reuse는 identity와 principal을 섞을 수 있다.</strong> HTTP는 같은 connection의 모든 request가 같은 user라고 가정하지 않는다.</li>
+            <li><strong>성공 응답과 exactly-once는 다르다.</strong> Response loss/retry window는 idempotency와 deduplication으로 다룬다.</li>
+            <li><strong>Observability가 새 유출 경계가 될 수 있다.</strong> TLS가 숨긴 token/body를 verbose log에 평문으로 남기지 않는다.</li>
+            <li><strong>“내부망이라 안전”은 통제가 아니다.</strong> Plaintext reader, route owner, workload identity와 lateral movement threat를 적는다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“HTTPS가 제공하는 것과 제공하지 않는 것을 client→LB→app 구조로 설명하세요.”</strong><br>좋은 답변 구조: threat model → front TLS endpoint/private key → confidentiality/integrity/server auth → termination plaintext → upstream 별도 TLS/mTLS → application authz/DB commit 미보장 → logging·rollback.</li>
+            <li><strong>“HTTP/1.1, HTTP/2, HTTP/3의 framing과 HOL failure scope를 비교하세요.”</strong><br>좋은 답변 구조: 공통 HTTP semantics → H1 ordered messages/pipelining → H2 frames/streams over one TCP → TCP loss HOL → H3 QUIC stream offset recovery → shared cwnd/flow/QPACK → negotiation/fallback trade-off.</li>
+            <li><strong>“특정 tenant만 certificate 오류이고 <code>-k</code>는 성공합니다. 15분 대응을 설계하세요.”</strong><br>좋은 답변 구조: SNI/URL/SAN/fingerprint·edge 증거 → TCP/TLS/HTTP success boundary → default cert/partial rollout 가설 → tenant canary route/직전 cert rollback → 검증 우회 금지 → 모든 edge fresh handshake·error budget 확인.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li><code>time_appconnect − time_connect</code>를 TLS 구간으로 해석할 때 필요한 전제는?</li>
+            <li>자체서명 certificate를 trust해도 IP URL에서 hostname mismatch가 난 이유는?</li>
+            <li>Curl exit 0, HTTP 200, DB commit은 왜 서로 다른 성공 경계인가?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 새 direct connection, proxy/reuse/redirect/IP race와 TLS backend 전제를 적는다. ② Path trust와 reference IP↔presented DNS SAN identity match는 별도 검증이다. ③ 각각 process/transport+protocol, application response, durable state의 owner와 확정 시점이 다르다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>암호화·무결성·인증·인가를 한 문장씩 구분하고 TLS termination 뒤 무엇이 사라지는지 설명하라.</li>
+            <li>HTTP/2 stream A loss가 B를 막을 수 있지만 HTTP/3에서는 B가 진행할 수 있는 내부 이유는?</li>
+            <li>“end-to-end TLS” architecture review에서 반드시 물어볼 owner/state 질문 다섯 개를 제시하라.</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 내용 은닉, 변조 탐지, peer identity 확인, action 허용 결정이며 termination 뒤 해당 TLS record 보호가 끝나 새 hop 보호가 필요하다. ② H2는 하나의 TCP byte sequence gap을 공유하고 H3는 packet number와 stream offset을 분리해 stream별 delivery를 복구한다. ③ Endpoint/private-key owner, trust store와 peer identity, plaintext 위치, connection pool/timeout, authorization, success/commit 중 다섯 가지. 문항당 정의 1점, state/flow 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc8446.html" style="color:#0369a1;">RFC 8446 · TLS 1.3 security properties, handshake, record protection</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9110.html" style="color:#0369a1;">RFC 9110 · HTTP semantics와 intermediation</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9113.html" style="color:#0369a1;">RFC 9113 · HTTP/2 framing, streams, multiplexing</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9114.html" style="color:#0369a1;">RFC 9114 · HTTP/3와 QUIC stream security/delivery mapping</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 29 / Week 5</strong><br>
+            <span>Forward/reverse proxy와 connection termination — 누가 누구 대신 연결하는지, client↔proxy↔origin socket과 TLS 경계, header/source identity, pool·timeout·retry·backpressure를 실제 request flow로 추적합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
