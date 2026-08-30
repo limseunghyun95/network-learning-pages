@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 29</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">PROXY · LB · NAT · CLOUD NETWORK · WEEK 5 / DAY 29</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">forward/reverse proxy와 connection termination</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">한 요청이 여러 socket·queue·trust 경계로 갈라지는 과정 · 개념 65분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Forward proxy는 client가 선택해 외부로 나가는 요청을 대신하고, reverse proxy는 client에게 origin처럼 보이며 내부 backend를 대신한다. 둘 다 message를 이해하면 <strong>client↔proxy와 proxy↔origin은 서로 다른 connection</strong>이므로 5-tuple, TLS key, protocol version, pool, queue, timeout, retry와 성공 시점을 따로 추적해야 한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Intermediary</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">User agent와 origin 사이에서 request/response를 전달·변환하는 중간 구성요소. Proxy, gateway(reverse proxy), tunnel이 대표 형태다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Forward proxy</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client 설정이 선택하는 대리자. Egress policy, filtering, cache, audit를 위해 client 대신 여러 origin에 연결한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Reverse proxy / gateway</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client 쪽에서는 origin처럼 응답하고 내부에서는 backend를 선택해 요청을 전달하는 대리자. TLS termination, routing, load balancing, WAF에 쓰인다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Tunnel / CONNECT</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">두 connection 사이 byte를 blind relay하는 방식. HTTP CONNECT 성공은 tunnel 준비를 뜻하며 그 안의 origin TLS handshake 성공을 뜻하지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Downstream / upstream</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Proxy 기준 client 쪽 connection을 downstream, origin/backend 쪽을 upstream이라 부른다. Request 방향은 origin 쪽으로 진행한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Termination</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">TCP/QUIC/TLS/HTTP connection state를 끝내고 그 protocol의 endpoint가 되는 것. TLS termination은 plaintext와 private-key 경계도 만든다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Connection pool</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Proxy가 backend connection을 생성·재사용하는 저장소. Client connection과 1:1이 아니며 max size, idle timeout, wait queue가 필요하다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Hop-by-hop field</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">현재 두 peer의 connection에만 의미가 있는 HTTP field. Intermediary는 Connection이 지목한 field와 알려진 connection-specific field를 다음 hop으로 그대로 넘기지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Forwarded / X-Forwarded-*</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Proxy 앞의 source, host, scheme 정보를 전달하는 metadata. Client도 위조할 수 있으므로 신뢰 proxy가 경계에서 제거·재작성한 값만 정책에 사용한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Via</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">HTTP message를 전달한 intermediary와 받은 protocol version을 기록해 loop 방지와 capability 진단에 쓰는 field.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Backpressure</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Downstream 유입이 upstream 처리량을 넘을 때 queue/stream/connection limit, pause, rejection으로 부하를 상류에 전달하는 제어.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Failure window</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">어느 hop의 어느 성공 뒤에 실패했는지 나타내는 범위. Downstream HTTP 502는 front connection 성공과 upstream 실패가 동시에 가능함을 뜻한다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>Proxy가 들어오면 “한 요청, 한 connection”이라는 직관이 깨진다. Client가 keep-alive로 proxy에 붙어 있어도 proxy는 다른 backend connection을 고르거나 새로 만들 수 있고, front는 HTTP/2인데 upstream은 HTTP/1.1일 수 있다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>성능:</strong> Client RTT보다 pool wait·backend connect·TLS handshake·queue가 p99를 지배할 수 있다.</li>
+            <li><strong>정확성:</strong> Proxy retry가 application retry와 겹치면 한 request가 backend에 여러 번 도달한다.</li>
+            <li><strong>보안:</strong> Client-supplied X-Forwarded-For를 신뢰하면 IP allowlist·audit·rate limit을 우회할 수 있다.</li>
+            <li><strong>장애:</strong> Proxy 502/504는 application bug 하나가 아니라 DNS, route, pool, connect, TLS, timeout, protocol parse failure의 합성 결과다.</li>
+            <li><strong>면접:</strong> 좋은 답변은 proxy 종류보다 connection graph, owner, 성공 경계, retry/timeout budget과 source identity를 설명한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:17%;">시점</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:54%;">CLIENT → FWD PROXY → REV PROXY → APP</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">상태·성공 경계</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① select</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">Client config/PAC/env → forward proxy<br>Service DNS → reverse proxy VIP</td><td style="padding:9px;border:1px solid #dbe3e8;">Control path<br>서로 다른 선택 주체</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② conn A</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">Client ephemeral port → FWD listener<br>HTTP absolute-form 또는 CONNECT host:port</td><td style="padding:9px;border:1px solid #dbe3e8;">Socket A·auth·queue<br>CONNECT 200≠origin TLS</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ conn B</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">FWD source/NAT → reverse proxy:443<br>Tunnel 안 ClientHello SNI + ALPN</td><td style="padding:9px;border:1px solid #dbe3e8;">Socket B 또는 tunnel<br>Front TLS ends at REV</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ L7</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">REV decrypt/parse → route·WAF·auth policy<br>Hop fields 제거, Forwarded/Via 재작성</td><td style="padding:9px;border:1px solid #dbe3e8;">Plaintext·request state<br>downstream response timer</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ conn C</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">Pool wait → idle upstream 재사용/새 connect<br>Optional TLS/mTLS → APP</td><td style="padding:9px;border:1px solid #dbe3e8;">Socket C·pool·TLS B<br>Client와 1:1 아님</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑥ result</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">APP response → REV buffer/stream → FWD → Client<br>또는 upstream error → 502/504 합성</td><td style="padding:9px;border:1px solid #dbe3e8;">Hop별 ACK와 timeout<br>business commit 별도</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>선택:</strong> Forward proxy는 client/organization이 선택하고, reverse proxy는 service operator가 DNS/VIP로 배치한다. Transparent interception은 client가 선택한 HTTP proxy와 다르다.</li>
+            <li><strong>Forward HTTP:</strong> Plain HTTP proxy는 absolute URI를 읽어 origin에 새 connection을 만든다. Proxy authentication과 egress policy가 이 hop에 적용된다.</li>
+            <li><strong>CONNECT tunnel:</strong> Forward proxy가 target까지 TCP 연결 후 200을 주면 byte tunnel이 열린다. Origin TLS는 그 안에서 client와 reverse proxy 사이에 별도로 수행된다. TLS inspection proxy라면 tunnel이 아니라 새 TLS endpoint가 되어 trust 경계가 달라진다.</li>
+            <li><strong>Reverse L7:</strong> Reverse proxy는 client request를 parse하고 route/header/policy를 바꿀 수 있다. Downstream HTTP/2 stream을 upstream HTTP/1.1 request로 변환할 수도 있다.</li>
+            <li><strong>Pool:</strong> Upstream connection은 여러 client request가 시간상 공유하거나 한 client의 병렬 request가 여러 connection으로 갈 수 있다. Pool wait와 connect time을 분리 측정한다.</li>
+            <li><strong>응답:</strong> Upstream connect/refused/TLS/timeout을 reverse proxy가 502 또는 504로 변환할 수 있다. Client가 본 status는 error origin의 위치를 직접 증명하지 않는다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>핵심 불변식:</strong> Message-aware intermediary를 지날 때마다 incoming connection과 outgoing connection은 별도 state다. 한 hop의 TLS/ACK/keep-alive 성공을 다음 hop 성공으로 전이시키지 말고, request identity와 deadline만 명시적으로 전달한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Proxy는 두 socket 사이 단순 복사가 아닐 수 있다</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:27%;">Proxy mode</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">읽을 수 있는 것·소유 state</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">L4 forwarding</td><td style="padding:9px;border:1px solid #dbe3e8;">IP/port/connection metadata로 backend를 선택하고 byte를 relay한다. TLS plaintext/HTTP method는 보지 않지만 connection table·timeout·buffer를 소유한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">CONNECT tunnel</td><td style="padding:9px;border:1px solid #dbe3e8;">CONNECT target과 tunnel lifetime은 알지만 tunnel 내부 TLS application data는 종료하지 않는 한 읽지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">L7 reverse proxy</td><td style="padding:9px;border:1px solid #dbe3e8;">TLS를 끝내면 SNI/cert/key와 HTTP method/path/header/body/stream을 읽고 route·retry·buffer·transform을 수행한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">TLS inspection</td><td style="padding:9px;border:1px solid #dbe3e8;">Client와 별도 TLS, origin과 별도 TLS를 맺는 active endpoint다. Client trust store에 inspection CA가 필요하며 privacy/key owner를 명시해야 한다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">Hop-by-hop field와 protocol translation</h3>
+          <p><code>Connection</code>이 지목한 field와 Keep-Alive, Proxy-Connection, Transfer-Encoding 같은 connection-specific metadata를 그대로 다음 hop에 넘기면 framing confusion과 request smuggling 위험이 생긴다. Intermediary는 incoming message를 자신의 parser로 완결성 있게 읽고 hop field를 제거한 뒤 outgoing protocol에 맞게 새 message를 만든다.</p>
+          <p>HTTP version도 hop마다 다를 수 있다. Client↔proxy가 H2이고 proxy↔origin이 H1이면 H2 stream reset을 upstream TCP close로 mapping하거나 response framing을 재구성해야 한다. 이 변환 과정이 failure scope와 retry 가능성을 바꾼다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Source identity는 packet과 header에서 다르게 보인다</h3>
+          <ul style="padding-left:22px;">
+            <li><strong>Socket peer:</strong> Origin이 보는 source IP는 보통 reverse proxy의 upstream IP다. 이것은 kernel이 확인한 직전 peer다.</li>
+            <li><strong>Forwarded metadata:</strong> 원 client IP/scheme/host는 HTTP field로 전달할 수 있지만 cryptographic fact가 아니다.</li>
+            <li><strong>Trust algorithm:</strong> Public client가 보낸 기존 X-Forwarded-*를 경계 proxy에서 제거하고, 직접 관측한 peer 값을 새로 기록한다. App은 allowlist된 proxy hop 수/주소만 신뢰한다.</li>
+            <li><strong>Privacy:</strong> Forwarded chain은 내부 topology와 개인 IP를 노출할 수 있어 최소 정보·보존 기간·redaction을 설계한다.</li>
+          </ul>
+
+          <h3 style="font-size:18px;color:#075985;">Pool, queue, deadline의 수학</h3>
+          <p>Pool 크기가 <code>C</code>, 평균 upstream service time이 <code>W</code>초면 안정적인 처리율 상한은 대략 <code>C/W</code> request/s이고, 도착률이 이를 지속 초과하면 queue가 자란다. Little's Law <code>L=λW</code>로 queue 대기와 동시 request를 연결한다. 무제한 pool은 backend/NAT ephemeral port를 고갈시키고 무제한 queue는 timeout 직전의 쓸모없는 작업을 쌓는다.</p>
+          <p>Caller deadline에서 DNS/front/pool/connect/TLS/upstream response/response write budget을 차감한다. Proxy가 caller보다 긴 timeout으로 backend 작업을 계속하면 client는 이미 retry해 duplicate load가 된다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Retry의 모호한 성공 창</h3>
+          <p>Upstream connect 전에 실패하면 request가 app에 도달하지 않았을 가능성이 높지만, body 전송 후 response 전에 timeout이면 app commit 여부가 모호하다. Proxy가 POST를 자동 retry하려면 method 이름만 보지 말고 replayability, body buffering, idempotency key, backend transaction status를 확인해야 한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Connection graph</td><td style="padding:9px;border:1px solid #dbe3e8;">Downstream/upstream 5-tuple, protocol/TLS endpoint, pool owner를 architecture에 그린다. Client connection과 backend connection을 1:1로 가정하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Header trust</td><td style="padding:9px;border:1px solid #dbe3e8;">Edge에서 untrusted Forwarded/X-Forwarded-*를 제거·정규화하고 직접 관측값을 추가한다. App은 trusted proxy CIDR/hop count만 해석한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Hop fields/framing</td><td style="padding:9px;border:1px solid #dbe3e8;">Connection이 지목한 field를 포함한 hop-by-hop metadata를 제거하고 ambiguous Content-Length/Transfer-Encoding을 거부한다. Parser 일관성을 security test로 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Pool과 backpressure</td><td style="padding:9px;border:1px solid #dbe3e8;">Backend capacity·service time으로 max connection/stream/queue를 정하고 queue wait metric과 빠른 503/load shedding을 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Timeout budget</td><td style="padding:9px;border:1px solid #dbe3e8;">Client deadline &gt; proxy total &gt; pool+connect+TLS+upstream response가 되도록 margin을 둔다. Idle/read/write timeout 의미를 제품별로 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Retry</td><td style="padding:9px;border:1px solid #dbe3e8;">Attempt 수·retryable phase/status·backoff+jitter·per-try budget을 제한한다. Body 전송 뒤 write는 idempotency key 없이는 자동 retry하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">TLS와 identity</td><td style="padding:9px;border:1px solid #dbe3e8;">Front와 upstream TLS의 SNI/SAN/trust/key owner를 분리하고 workload mTLS identity를 authorization에 안전하게 mapping한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Drain</td><td style="padding:9px;border:1px solid #dbe3e8;">Readiness에서 먼저 제외하고 새 request를 막은 뒤 active streams/connections를 deadline 안에 drain한다. 전체 proxy 동시 재시작을 피한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">Downstream/upstream connection ID, route/backend, pool wait, connect/TLS/TTFB, retries, bytes, status/error origin, request ID를 기록하되 auth/token/body는 redaction한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> NGINX, Envoy, HAProxy, cloud LB는 timeout 명칭, H2/H3 upstream 지원, header normalization, retry default, drain semantics가 다르다. 문서 이름만 복사하지 말고 실제 version config dump와 canary traffic으로 state transition을 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">Proxy 502/504·connection reset, 특정 route만 p99 급증, pool pending/active saturation, backend는 정상인데 client timeout, source IP/rate limit 오판, retry 후 duplicate write.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">Request/idempotency ID·timestamp, downstream/upstream 5-tuple·protocol·TLS, selected route/backend, pool active/idle/pending, queue/connect/TLS/TTFB timing, retry attempt/reason, bytes sent, proxy-generated vs upstream status, app receive/commit log.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">Backend DNS/route/refused, stale pooled socket, pool exhaustion, upstream TLS SNI/SAN, timeout 역전, H2/H1 framing/ALPN mismatch, backend overload, hop-header leak, Forwarded spoof, retry amplification, NAT port exhaustion.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">실패 route/backend cohort를 격리하고 신규 traffic을 정상 pool로 제한 전환한다. Retry를 축소하고 queue 상한/load shedding을 적용하며 기존 정상 connection은 보존한다. Request ID로 app 도달 여부를 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 route/pool/TLS/header/timeout 정책으로 canary rollback, bad idle connection drain, backend readiness와 fresh connect 확인, pending·502/504·retry·duplicate 지표가 baseline으로 돌아온 뒤 점진 재확대한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">Pool/queue/timeout 무제한 확대, 모든 method 무조건 retry, X-Forwarded-For 첫 값을 신뢰, TLS 검증 해제, 전체 proxy 동시 재시작, 502를 app bug로 단정, secret/body 전체 trace를 공유하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: 두 TCP connection과 502 failure window 관찰</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop/Engine과 Compose, 저장소 root. Lab은 <code>client→proxy:8080→api:8000</code> reverse proxy path를 사용한다. 실행 전 direct와 proxy 경유 시 API가 보게 될 socket peer, Host, path, failure status를 예측한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 상태 확인 (5분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>make doctor
+make up
+make ps</code></pre>
+          <p>예상: client, dns, api, web, proxy가 실행된다. 기존 환경에 충돌이 있으면 무작정 port를 바꾸지 말고 <code>docker compose</code> 상태와 사용 중 network부터 확인한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · Direct와 reverse proxy 경유 비교 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sS http://api:8000/headers
+
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sv http://proxy:8080/api/headers</code></pre>
+          <p><strong>예상:</strong> Proxy response에는 <code>X-Lab-Upstream: api:8000</code>이 있고 API가 받은 path는 <code>/headers</code>로 바뀐다. API의 socket peer는 direct에서는 client, 경유에서는 proxy다. Proxy가 넣은 <code>X-Lab-Proxy</code>와 <code>X-Forwarded-Host</code>도 확인한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · 두 connection을 packet으로 분리 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code># 터미널 A: proxy namespace의 client-side 8080과 upstream 8000 관찰
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec proxy tcpdump -ni eth0 'tcp port 8080 or tcp port 8000'
+
+# 터미널 B
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sS http://proxy:8080/api/headers &gt;/dev/null</code></pre>
+          <p><strong>예상:</strong> client↔proxy:8080과 proxy ephemeral port↔api:8000 traffic이 별도 5-tuple로 보인다. 관찰 후 터미널 A에서 Ctrl-C한다. Packet ACK와 HTTP response/commit을 같은 성공으로 부르지 않는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입: upstream만 중지 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml stop api
+
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sv --max-time 7 http://proxy:8080/api/headers
+
+docker compose -f labs/basic-network-observability/docker-compose.yml start api</code></pre>
+          <p><strong>예상:</strong> Client→proxy connection과 HTTP request는 성공하지만 proxy→api connect가 실패해 proxy가 JSON body와 502를 합성한다. 이는 “502를 받았으니 app가 502를 보냈다”가 틀릴 수 있음을 증명한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · 복구·cleanup (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -fsS http://proxy:8080/api/headers &gt;/dev/null
+make down</code></pre>
+          <p><strong>자주 나는 오류:</strong> Permission denied이면 Docker daemon/사용자 권한을 확인한다. <code>proxy</code>에서 tcpdump가 없으면 image build 상태를 확인한다. 502가 아니라 connection refused면 client가 proxy가 아닌 api에 직접 붙었는지 URL을 본다. API 재시작 직후 race가 나면 readiness를 확인하고 bounded 재시도한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Forward와 reverse는 packet 방향 이름이 아니다.</strong> 누가 proxy를 선택하고 누구를 대신해 보이는지가 기준이다.</li>
+            <li><strong>CONNECT 200은 origin HTTPS 200이 아니다.</strong> Tunnel 생성 뒤 TLS와 HTTP가 남아 있다.</li>
+            <li><strong>Client IP header는 packet source가 아니다.</strong> Trusted boundary가 재작성하지 않으면 client 입력일 뿐이다.</li>
+            <li><strong>한 request가 한 socket만 쓰지 않는다.</strong> Message-aware proxy마다 connection과 queue가 새로 생긴다.</li>
+            <li><strong>Front H2가 upstream H2를 뜻하지 않는다.</strong> Protocol translation과 stream→connection failure mapping을 확인한다.</li>
+            <li><strong>502/504의 생성자를 찾는다.</strong> Via/Server/header, proxy access/error log, request ID로 어느 hop이 status를 만들었는지 본다.</li>
+            <li><strong>Pool reuse는 공짜가 아니다.</strong> Stale idle socket, max lifetime, DNS change, cert rotation과 drain 정책이 필요하다.</li>
+            <li><strong>Timeout을 크게 하면 capacity가 늘지 않는다.</strong> Queue residence와 concurrent state가 늘어 overload recovery를 늦춘다.</li>
+            <li><strong>Proxy retry와 SDK retry를 곱하지 않는다.</strong> 2회×3회는 최대 6 backend attempt가 될 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“Forward proxy, reverse proxy, tunnel을 connection 관점으로 비교하세요.”</strong><br>좋은 답변 구조: 선택 주체/client visibility → absolute-form/CONNECT/gateway → incoming/outgoing socket → TLS termination 여부 → readable metadata → policy/cache/use case → trust·failure boundary.</li>
+            <li><strong>“Reverse proxy에서 간헐적 502가 납니다. 15분 진단을 설계하세요.”</strong><br>좋은 답변 구조: status generator와 request ID → route/backend cohort → pool pending/idle/active → fresh connect DNS/TCP/TLS/ALPN → stale socket/timeout 가설 → 정상 pool canary → retry 축소·rollback·baseline.</li>
+            <li><strong>“원 client IP를 안전하게 application까지 전달하세요.”</strong><br>좋은 답변 구조: Socket peer와 header 구분 → edge가 untrusted chain 제거 → 직접 관측값으로 Forwarded 재작성 → trusted proxy allowlist/hop count → inter-proxy TLS/mTLS → privacy/redaction → spoof test.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>TLS termination 뒤 upstream에 자동으로 이어지지 않는 세 보안 속성은?</li>
+            <li>HTTP/2와 HTTP/3에서 한 stream loss의 다른 영향은 무엇이며 어떤 shared state는 남는가?</li>
+            <li>Transport ACK, HTTP response, DB commit을 왜 분리해야 하는가?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 기밀성·무결성·peer 인증은 새 connection에서 다시 구성해야 한다. ② H2는 TCP sequence gap이 모든 stream delivery를 막을 수 있고 H3는 stream별 복구하지만 cwnd·connection flow/QPACK은 공유한다. ③ 각각 peer transport 수신, application 응답, durable transaction으로 owner와 failure window가 다르다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Client→reverse proxy→app 요청에 최소 몇 connection이 있고 각 owner/state는 무엇인가?</li>
+            <li>Forwarded/X-Forwarded-For를 authorization에 안전하게 쓰기 위한 조건은?</li>
+            <li>Proxy가 POST body를 보낸 뒤 upstream timeout이 났을 때 즉시 retry하면 안 되는 이유와 대안은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 최소 downstream과 upstream 두 개이며 각각 5-tuple, protocol/TLS, buffer/timeout과 pool state가 독립이다. ② Public 입력을 경계에서 제거하고 trusted proxy가 직접 관측값으로 재작성하며 app은 allowlist된 hop만 해석한다. ③ App commit 여부가 모호해 중복 write가 가능하므로 idempotency key, dedup, status 조회, bounded policy가 필요하다. 문항당 정의 1점, state/flow 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9110.html" style="color:#0369a1;">RFC 9110 · HTTP intermediary, proxy, gateway, tunnel, message forwarding</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9112.html" style="color:#0369a1;">RFC 9112 · HTTP/1.1 message framing과 connection-specific field</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc7239.html" style="color:#0369a1;">RFC 7239 · Forwarded header, trust와 privacy 고려사항</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc8446.html" style="color:#0369a1;">RFC 8446 · TLS 1.3 endpoint, authentication과 protected channel</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 30</strong><br>
+            <span>L4/L7 LB, health check, stickiness — packet/connection/request 단위 backend 선택, readiness와 실제 user path의 차이, consistent hashing·cookie affinity, fail-open/close와 drain을 추적합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

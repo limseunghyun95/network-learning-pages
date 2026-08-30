@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-29T09:20:38+09:00",
+  "updatedAt": "2026-08-30T09:10:53+09:00",
   "lessons": [
     {
       "day": 1,
@@ -257,6 +257,15 @@
       "path": "day-28.html",
       "kind": "review",
       "publishedAt": "2026-08-29T09:20:38+09:00"
+    },
+    {
+      "day": 29,
+      "week": 5,
+      "title": "forward/reverse proxy와 connection termination",
+      "summary": "Forward proxy·reverse proxy·tunnel을 incoming/outgoing connection으로 분해하고 TLS termination, pool·queue·timeout·retry, hop header와 source identity의 실무 경계를 추적합니다.",
+      "path": "day-29.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-30T09:10:53+09:00"
     }
   ]
 }
