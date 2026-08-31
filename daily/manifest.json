@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-30T09:10:53+09:00",
+  "updatedAt": "2026-08-31T09:01:10+09:00",
   "lessons": [
     {
       "day": 1,
@@ -266,6 +266,15 @@
       "path": "day-29.html",
       "kind": "lesson",
       "publishedAt": "2026-08-30T09:10:53+09:00"
+    },
+    {
+      "day": 30,
+      "week": 5,
+      "title": "L4/L7 LB, health check, stickiness",
+      "summary": "L4 flow와 L7 request selection을 분리하고 active/passive health state, threshold·drain·convergence, stickiness와 hash remapping의 실무 trade-off를 추적합니다.",
+      "path": "day-30.html",
+      "kind": "lesson",
+      "publishedAt": "2026-08-31T09:01:10+09:00"
     }
   ]
 }

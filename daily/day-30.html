@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 30</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">PROXY · LB · NAT · CLOUD NETWORK · WEEK 5 / DAY 30</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">L4/L7 LB, health check, stickiness</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">선택 단위·건강 상태·affinity의 소유자를 분리한다 · 개념 65분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            L4 LB는 주로 flow의 IP·port 같은 transport 정보로 connection의 backend를 고르고, L7 LB는 종료한 HTTP connection 안에서 request·stream별로 backend를 고를 수 있다. Health check는 <strong>실제 요청과 다른 synthetic control path</strong>이고, stickiness는 부하 분산보다 affinity를 우선하는 상태이므로 선택 key·유효 기간·장애 시 fallback을 명시해야 한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Load balancer</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">여러 backend 후보 중 새 packet·flow·request를 처리할 대상을 선택하는 구성요소. 단순 분산뿐 아니라 장애 격리, capacity 조절, TLS·policy 경계 역할도 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">L4 / L7</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">L4는 TCP/UDP transport 정보, L7은 HTTP 같은 application protocol 의미를 가리킨다. 제품 이름이 아니라 실제로 어느 protocol을 parse·terminate하는지가 기준이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">5-tuple</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">source IP·source port·destination IP·destination port·protocol. L4 flow를 구별하는 대표 key이며 구현에 따라 일부 field나 다른 salt가 추가될 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">VIP / backend</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">VIP는 client가 접속하는 virtual IP, backend는 실제 처리를 맡는 server endpoint다. VIP가 살아 있어도 모든 backend가 건강하다는 뜻은 아니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Active health check</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">LB가 주기적으로 TCP connect, HTTP request, gRPC call 등을 보내 건강 상태를 직접 측정하는 synthetic traffic.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Passive check</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">실제 user traffic의 connect failure, reset, 5xx, latency를 관찰해 backend를 outlier로 판단하는 방식.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Readiness / liveness</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Readiness는 지금 새 traffic을 받아도 되는지, liveness는 process를 재시작할 만큼 복구 불가능한지를 묻는다. 같은 endpoint로 섞으면 장애를 키울 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Healthy threshold</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">연속 몇 번 성공해야 healthy로 복귀하는지 정하는 값. Unhealthy threshold와 함께 flapping을 줄이는 hysteresis를 만든다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Stickiness / affinity</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">같은 client/session/key를 같은 backend로 보내려는 규칙. Cookie, source IP, consistent hash key, LB state table로 구현한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Consistent hashing</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Backend 집합이 바뀔 때 key 전체가 재배치되지 않도록 이동 범위를 줄이는 hash 계열 기법. 균등 분산과 최소 이동은 별도 검증해야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Drain / deregistration delay</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">새 선택에서는 제외하되 기존 connection·request가 제한 시간 안에 끝나도록 기다리는 전이 상태.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Control path / data path</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Control path는 discovery·health·weight·membership을 갱신하고, data path는 실제 packet/request를 전달한다. 둘의 갱신 지연이 failure window를 만든다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>LB 장애는 “서버 몇 대에 나눠 준다”로는 설명되지 않는다. 선택 단위가 connection인지 request인지, health state를 누가 언제 갱신하는지, sticky key가 어느 backend set을 전제로 하는지에 따라 증상과 복구가 달라진다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>가용성:</strong> 너무 느린 health check는 실패 backend로 계속 보내고, 너무 민감한 check는 일시적 지연에 healthy backend를 모두 제거한다.</li>
+            <li><strong>성능:</strong> Round robin은 request 비용이 균일하다는 가정이 있고, least-connections도 HTTP/2 stream 수나 backend queue를 모르면 실제 부하를 오판한다.</li>
+            <li><strong>정확성:</strong> Sticky backend에 session state를 두면 장애·scale-in 때 session이 사라지고 hot key가 한 server를 과부하시킬 수 있다.</li>
+            <li><strong>보안:</strong> L7 LB는 TLS plaintext와 cookie/header를 보므로 key·PII·로그 redaction 경계를 소유한다.</li>
+            <li><strong>면접:</strong> 좋은 답변은 알고리즘 이름보다 key, granularity, state owner, convergence time, failure fallback과 관측 지표를 연결한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:16%;">시점</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:55%;">DNS → L4/L7 LB → BACKEND</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">상태·소유자</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① control</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">Discovery + active/passive check → healthy set<br>weight·drain·zone membership 갱신</td><td style="padding:9px;border:1px solid #dbe3e8;">LB control plane<br>eventual consistency</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② DNS</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">Client resolver → service name → VIP<br>route/ARP·NDP → LB next hop</td><td style="padding:9px;border:1px solid #dbe3e8;">Cache TTL·route<br>LB 도달만 확정</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ L4</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">SYN/QUIC packet + 5-tuple hash → backend B<br>flow table/NAT state 생성</td><td style="padding:9px;border:1px solid #dbe3e8;">Connection/flow 단위<br>LB·kernel state</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ L7</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">TLS terminate → HTTP parse → host/path/cookie<br>request/stream별 route와 backend 선택</td><td style="padding:9px;border:1px solid #dbe3e8;">Connection + stream<br>pool·queue·retry</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ sticky</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">session key → affinity lookup/hash → backend B<br>B unhealthy면 policy에 따라 break/fail</td><td style="padding:9px;border:1px solid #dbe3e8;">Cookie/table/hash owner<br>TTL·backend set</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑥ response</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">Backend response → LB → Client<br>status·latency가 passive health evidence로 환류</td><td style="padding:9px;border:1px solid #dbe3e8;">Data→control feedback<br>timestamp·request ID</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>Membership:</strong> Service discovery가 endpoint를 추가해도 모든 LB node가 동시에 알지는 않는다. Health check가 통과하기 전 ready set과 configured set은 다를 수 있다.</li>
+            <li><strong>도달:</strong> DNS·route 성공은 VIP listener 도달만 말한다. Backend selection과 application readiness는 이후 단계다.</li>
+            <li><strong>L4 선택:</strong> 보통 새 flow의 첫 packet에서 hash/table로 backend를 정하고 같은 flow를 고정한다. Packet마다 round robin하면 TCP reorder와 path disruption을 만들 수 있다.</li>
+            <li><strong>L7 선택:</strong> LB가 TLS/HTTP endpoint가 되므로 동일 downstream HTTP/2 connection의 서로 다른 stream을 서로 다른 backend connection에 전달할 수 있다.</li>
+            <li><strong>Affinity:</strong> Sticky key는 후보 set이 그대로일 때만 안정적이다. Backend 제거 시 cookie mapping이 무효가 되거나 hash가 재배치된다.</li>
+            <li><strong>Feedback:</strong> 실제 traffic 실패는 passive health로 control state를 바꿀 수 있다. 이 feedback이 너무 공격적이면 장애 시 traffic이 남은 backend로 몰리는 load concentration을 만든다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>핵심 불변식:</strong> 선택 결과는 그 시점의 healthy backend set과 selection key에 대한 함수다. Health state가 바뀌면 같은 client라도 결과가 달라질 수 있으며, 기존 connection의 backend와 새 request의 backend는 별도로 추적해야 한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">선택 granularity가 state machine을 결정한다</h3>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:27%;">단위</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">선택 key·state·trade-off</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Packet</td><td style="padding:9px;border:1px solid #dbe3e8;">ECMP/LAG가 header hash로 path를 고른다. Flow-stable hash가 일반적이며 next-hop set 변화는 flow remapping을 일으킨다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Flow/connection</td><td style="padding:9px;border:1px solid #dbe3e8;">5-tuple→backend mapping, conntrack/NAT/timeout을 소유한다. Long-lived connection 하나가 backend load를 오래 고정할 수 있다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Request/stream</td><td style="padding:9px;border:1px solid #dbe3e8;">Host/path/header/cookie와 healthy set으로 선택한다. 더 정교하지만 parse·TLS·pool·queue 비용과 retry ambiguity를 소유한다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">알고리즘은 측정값의 의미보다 정확하지 않다</h3>
+          <ul style="padding-left:22px;">
+            <li><strong>Round robin:</strong> 단순하고 state가 작지만 request cost와 connection length가 균일하다는 가정이 있다.</li>
+            <li><strong>Least connections:</strong> Active connection 수를 proxy로 쓰지만 H2의 한 connection에 수백 stream이 있으면 work를 과소평가할 수 있다.</li>
+            <li><strong>Weighted:</strong> 이질적인 capacity를 반영하지만 weight 변경과 in-flight work 사이의 지연을 고려해야 한다.</li>
+            <li><strong>Hash:</strong> Key affinity를 주지만 skewed tenant/key가 hot backend를 만든다. Modulo-N은 backend 수 변화 때 대규모 remapping이 생길 수 있다.</li>
+            <li><strong>Power of two choices:</strong> 임의 두 후보의 load를 비교해 작은 쪽을 고르면 full scan 없이 tail load를 줄일 수 있지만 metric 신선도가 필요하다.</li>
+          </ul>
+
+          <h3 style="font-size:18px;color:#075985;">Health check도 분산 시스템이다</h3>
+          <p>Interval이 <code>I</code>, timeout이 <code>T</code>, 연속 실패 threshold가 <code>F</code>라면 최악의 감지 시간은 대략 scheduler jitter를 제외하고 <code>I×F+T</code> 범위가 될 수 있다. 그 뒤 control state 전파와 기존 connection drain 시간이 더해진다. 복귀는 success threshold를 따로 둬 flapping을 막는다.</p>
+          <p>TCP connect check는 listener만 증명하고, HTTP shallow check는 handler만 증명한다. 반대로 모든 DB·queue dependency를 readiness에 넣으면 공유 dependency의 작은 흔들림이 모든 backend를 동시에 제거한다. “새 traffic을 받아 처리할 최소 능력”을 검증하되 dependency failure를 별도 degraded state와 application SLO로 관측한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Stickiness는 숨은 distributed state다</h3>
+          <p>Cookie 방식은 mapping state를 client에 둘 수 있고, table 방식은 LB memory와 replica synchronization을 요구한다. Source-IP affinity는 NAT/기업 proxy 뒤 다수 사용자를 한 key로 뭉친다. Stateless service가 가능하면 session은 공유 store/token으로 옮기고 affinity를 optimization으로 낮추는 편이 장애 복구에 유리하다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">L4 vs L7</td><td style="padding:9px;border:1px solid #dbe3e8;">Source preservation·low overhead·non-HTTP이면 L4를 우선 검토하고, path/header/TLS/policy/request metric이 필요하면 L7을 쓴다. 둘을 계층화하면 health·timeout owner를 각각 그린다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Health endpoint</td><td style="padding:9px;border:1px solid #dbe3e8;">Cheap·bounded·side-effect-free하게 만들고 service identity와 version을 확인한다. Auth/network path는 실제 data path와 충분히 같아야 한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Threshold</td><td style="padding:9px;border:1px solid #dbe3e8;">Detection SLO에서 interval/timeout/failure threshold를 역산하고 복귀 threshold는 더 보수적으로 둔다. 전체 fleet 동시 check에 jitter를 넣는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Active + passive</td><td style="padding:9px;border:1px solid #dbe3e8;">Active check의 blind spot을 user-path error로 보완하되 passive ejection의 max 비율과 recovery를 제한해 남은 backend 과부하를 막는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Sticky key</td><td style="padding:9px;border:1px solid #dbe3e8;">IP보다 tenant/session cookie 같은 의미 있는 key를 쓰고 서명·TTL·rotation·cardinality·PII를 검토한다. Backend ID를 외부에 그대로 노출하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Unhealthy affinity</td><td style="padding:9px;border:1px solid #dbe3e8;">Availability 우선이면 stickiness를 깨고 healthy backend로 보내되 session externalization이 필요하다. Consistency 우선이면 명시적 failure를 주고 client가 모호한 재시도를 하지 않게 한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Deploy/drain</td><td style="padding:9px;border:1px solid #dbe3e8;">Readiness 실패→new selection 제외→connection/request drain→종료 순서를 지키고 long-lived connection의 max lifetime을 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">LB node, selection algorithm/key class, backend, health reason/state age, active connection/stream, queue, connect/TLS/TTFB, ejection, retry와 zone skew를 기록한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> NGINX open source의 passive check, NGINX Plus의 active check, Envoy의 active health/outlier detection, HAProxy의 cookie·IP stick table은 default와 의미가 다르다. 제품 이름으로 동작을 추정하지 말고 배포 version의 공식 문서·effective config·runtime state를 함께 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">일부 client만 지속 실패, healthy host 0, LB 503/connection reset, 특정 backend p99·CPU만 급증, deploy 중 sticky session logout, zone별 error 편차, health는 green인데 실제 API 5xx.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">Timestamp/request ID, LB node·VIP·protocol, selected backend·zone·algorithm, sticky key class, healthy/unhealthy/degraded count와 state age/reason, active/passive check 결과, connection/stream/queue, backend receive/commit log, config revision.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">Check path/Host/TLS 불일치, threshold 과민, control-plane 전파 지연, stale DNS/membership, source-IP NAT hot key, cookie가 제거된 backend를 지시, long-lived L4 flow, zone weight 오류, passive ejection cascade, app dependency 실패가 readiness 전체를 내림.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">문제 cohort·revision을 고정하고 healthy capacity를 확인한다. 잘못된 신규 deploy만 drain/제외하고 ejection 상한·load shedding으로 남은 backend를 보호한다. Sticky key 하나를 안전한 test request로 재현한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 health path/threshold/weight/affinity config로 canary rollback, backend readiness와 실제 user path 모두 검증, success threshold 통과 후 작은 weight로 복귀, session·error·zone skew가 baseline인지 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">모든 health check 비활성화, unhealthy backend 전체 강제 등록, threshold를 근거 없이 1로 변경, stick table 전체 삭제, LB 전체 동시 재시작, retry 무제한 증가, green health만 보고 app 정상으로 단정하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: L4 health와 L7 readiness의 차이·hash remapping 관찰</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop/Engine과 Compose, 저장소 root. 실행 전에 “TCP connect가 성공하지만 HTTP 503인 backend를 LB가 healthy로 봐도 되는가?”와 backend 수가 3→2가 될 때 modulo hash key가 얼마나 이동할지 예측한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 baseline (5분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>make doctor
+make up
+make ps</code></pre>
+          <p><strong>예상:</strong> client, dns, api, web, proxy가 실행되고 api:8000이 listen한다. 여기까지는 process/listener와 network path의 일부만 증명한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · L4 connect check와 L7 response 비교 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client nc -vz api 8000
+
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sv http://api:8000/status/503</code></pre>
+          <p><strong>예상:</strong> TCP connect는 성공하지만 HTTP는 503이다. Connect-only check가 application readiness를 과대평가할 수 있음을 보여준다. 반대로 503 endpoint 하나만으로 process liveness 실패를 선언해서도 안 된다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · 실제 proxy path와 backend 증거 (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sS -D - http://proxy:8080/api/headers
+
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sS -D - http://proxy:8080/web/plain</code></pre>
+          <p><strong>예상:</strong> <code>X-Lab-Upstream</code>이 api:8000과 web:8080을 구분한다. L7 path가 backend selection key가 될 수 있고, client가 본 하나의 proxy endpoint 뒤에 서로 다른 upstream connection이 있음을 확인한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입과 control-state 지연 생각하기 (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml stop api
+
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client sh -c 'nc -vz -w 2 api 8000; true'
+
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sv --max-time 7 http://proxy:8080/api/headers</code></pre>
+          <p><strong>예상:</strong> Direct connect는 실패하고 proxy는 upstream 실패를 502로 합성한다. 실제 LB라면 마지막 성공 check부터 unhealthy threshold·state 전파까지 일부 request가 실패 backend를 선택할 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · Modulo hash remapping과 cleanup (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>for key in alice bob carol dave erin frank; do
+  h=$(printf '%s' "$key" | cksum | awk '{print $1}')
+  printf '%-6s N=3:%s N=2:%s\n' "$key" "$((h % 3))" "$((h % 2))"
+done
+
+docker compose -f labs/basic-network-observability/docker-compose.yml start api
+make down</code></pre>
+          <p><strong>예상:</strong> Backend 수만 바꿨는데 많은 key의 index가 이동한다. 이것이 local session/cache miss와 재로그인을 만들 수 있다. <strong>자주 나는 오류:</strong> <code>nc</code>가 오래 기다리면 <code>-w 2</code>를 확인하고, proxy가 502가 아니면 api를 실제로 stop했는지 <code>make ps</code>로 본다. Docker 권한 오류는 daemon/context를 확인한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>L4가 반드시 pass-through는 아니다.</strong> Connection proxy/NAT 형태면 L4에서도 양쪽 connection state를 소유할 수 있다.</li>
+            <li><strong>L7 LB는 connection마다 한 backend가 아니다.</strong> HTTP/2 stream·HTTP request별 재선택이 가능하다.</li>
+            <li><strong>Healthy는 binary truth가 아니다.</strong> 특정 관측자·시점·endpoint·threshold의 결과다.</li>
+            <li><strong>Health path가 너무 얕으면 false positive, 너무 깊으면 correlated false negative가 난다.</strong></li>
+            <li><strong>Source-IP affinity는 user affinity가 아니다.</strong> NAT·mobile carrier·proxy가 많은 user를 하나로 묶는다.</li>
+            <li><strong>Least connections는 least work가 아니다.</strong> Stream 수, request cost, backend queue가 다를 수 있다.</li>
+            <li><strong>Scale-in은 capacity만 줄이지 않는다.</strong> Hash ring·cookie mapping·long-lived flow를 재배치한다.</li>
+            <li><strong>Passive ejection은 positive feedback이 될 수 있다.</strong> 일부 제거→남은 곳 과부하→추가 제거 순환을 제한한다.</li>
+            <li><strong>Retry는 LB selection과 곱해진다.</strong> 다른 backend 선택이 duplicate side effect를 없애지 않는다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“L4와 L7 load balancer의 차이를 packet부터 application까지 설명하세요.”</strong><br>좋은 답변 구조: 요구 protocol·source preservation → selection granularity/key → termination과 connection graph → health/data path → TLS·observability → 비용·failure scope → 계층화 대안.</li>
+            <li><strong>“서버는 정상인데 health check만 실패합니다. 어떻게 설계·진단합니까?”</strong><br>좋은 답변 구조: 정상의 정의 → check source DNS/route/TLS/Host/path/auth → timestamp·threshold·state age → 실제 user path 비교 → safe drain/canary → rollback → shallow/deep check trade-off.</li>
+            <li><strong>“Sticky session이 필요한 서비스를 10배 scale-out하세요.”</strong><br>좋은 답변 구조: session owner·key cardinality → cookie/IP/table/hash 비교 → hot key·NAT → backend set 변화/remapping → external session store/token → drain·TTL·fallback → migration metric.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Forward proxy와 reverse proxy를 누가 선택하고 누구 대신 보이는가?</li>
+            <li>Message-aware proxy를 지날 때 connection state가 어떻게 분리되는가?</li>
+            <li>Client가 보낸 X-Forwarded-For를 그대로 신뢰하면 안 되는 이유는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Forward는 client/조직이 선택하고 reverse는 service operator가 origin처럼 배치한다. ② Downstream/upstream 5-tuple·TLS·pool·queue·timeout은 독립이다. ③ Header는 client가 위조할 수 있어 trusted edge가 제거·재작성한 hop만 신뢰해야 한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>같은 HTTP/2 downstream connection의 request가 다른 backend로 갈 수 있는 이유는?</li>
+            <li>Interval 5초, timeout 2초, 실패 threshold 3이면 감지 지연을 어떻게 추정하고 무엇을 더해야 하는가?</li>
+            <li>Source-IP stickiness가 hot backend를 만드는 두 상황과 대안은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① L7 LB가 stream/request를 parse해 upstream pool에서 개별 선택하기 때문이다. ② 대략 최대 5×3+2초에 scheduler jitter, control 전파, drain을 더한다. ③ NAT/proxy 뒤 다수 user와 skewed IP traffic이며 signed cookie/tenant key, consistent hash, session externalization을 검토한다. 문항당 정의 1점, state/flow 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc2992.html" style="color:#0369a1;">RFC 2992 · ECMP hash selection, 성능과 next-hop 변화 시 disruption</a></li>
+            <li><a href="https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/health_checking" style="color:#0369a1;">Envoy 공식 문서 · active/passive health check, threshold와 identity</a></li>
+            <li><a href="https://nginx.org/en/docs/http/load_balancing.html" style="color:#0369a1;">NGINX 공식 문서 · round robin, least connections, IP hash, passive check</a></li>
+            <li><a href="https://www.haproxy.com/documentation/haproxy-configuration-tutorials/proxying-essentials/session-persistence/" style="color:#0369a1;">HAProxy 공식 문서 · cookie/IP session persistence</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 31</strong><br>
+            <span>SNAT/DNAT, conntrack, ephemeral port — packet header가 어느 hop에서 바뀌고 누가 reverse mapping state를 소유하는지, port exhaustion과 asymmetric routing을 추적합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
