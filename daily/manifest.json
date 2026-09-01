@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-08-31T09:01:10+09:00",
+  "updatedAt": "2026-09-01T09:01:15+09:00",
   "lessons": [
     {
       "day": 1,
@@ -275,6 +275,15 @@
       "path": "day-30.html",
       "kind": "lesson",
       "publishedAt": "2026-08-31T09:01:10+09:00"
+    },
+    {
+      "day": 31,
+      "week": 5,
+      "title": "SNAT/DNAT, conntrack, ephemeral port",
+      "summary": "NAT 전후 5-tuple과 conntrack original/reply state를 추적하고 reverse path, timeout, asymmetric routing, ephemeral/NAT port exhaustion을 실무 capacity model로 진단합니다.",
+      "path": "day-31.html",
+      "kind": "lesson",
+      "publishedAt": "2026-09-01T09:01:15+09:00"
     }
   ]
 }

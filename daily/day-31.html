@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 31</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">PROXY · LB · NAT · CLOUD NETWORK · WEEK 5 / DAY 31</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">SNAT/DNAT, conntrack, ephemeral port</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">주소 변환을 tuple·state·reverse path로 추적한다 · 개념 70분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            SNAT는 주로 나가는 packet의 source IP:port를, DNAT는 들어오는 packet의 destination IP:port를 바꾼다. 첫 packet에서 만든 conntrack/NAT mapping이 reply packet을 역변환하므로 <strong>양방향 packet이 같은 state owner를 지나야 한다</strong>. Ephemeral port 고갈은 application host뿐 아니라 NAT public IP·destination 조합에서도 발생한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">NAT / NAPT</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Network Address Translation은 IP 주소를 바꾸는 기능, NAPT는 IP와 TCP/UDP port까지 함께 매핑해 여러 내부 endpoint가 적은 외부 IP를 공유하게 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">SNAT</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Source NAT. Egress packet의 source tuple을 바꾼다. 외부 server는 원 client가 아니라 NAT public IP:port를 peer로 본다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">DNAT</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Destination NAT. Public VIP:port로 온 packet을 내부 server IP:port로 바꾼다. Port forwarding과 container published port가 대표 사례다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Tuple</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Packet/flow를 식별하는 field 묶음. 보통 protocol + source IP:port + destination IP:port의 5-tuple을 말한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Conntrack</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Connection tracking. Kernel이나 network appliance가 original/reply 방향 tuple, NAT mapping, timeout, 관찰 상태를 저장하는 table/subsystem이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Ephemeral port</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client가 outbound socket을 열 때 OS가 임시로 고르는 local source port. NAT가 다시 고르는 external port와 같을 수도, 다를 수도 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Mapping / filtering</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Mapping은 내부 tuple을 외부 tuple로 바꾸는 규칙, filtering은 어떤 외부 source의 inbound packet을 그 mapping으로 허용할지 정하는 정책이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Idle timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">일정 시간 packet이 없을 때 state를 만료시키는 시간. Application connection은 살아 있다고 믿어도 중간 NAT mapping은 사라질 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Asymmetric routing</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Request와 reply가 다른 경로·stateful device를 지나는 현상. Reply 쪽 NAT/conntrack에 mapping이 없으면 drop 또는 잘못된 tuple이 된다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Hairpin NAT</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">같은 NAT 내부 host가 다른 내부 service의 external address를 사용했을 때 packet을 NAT가 내부로 되돌려 전달하는 동작.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Port preservation</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">충돌이 없으면 내부 source port를 external port로 유지하려는 동작. 보장으로 단정하면 안 되며 충돌·구현에 따라 다른 port가 배정된다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Checksum</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Header/payload 손상을 검출하는 값. NAT가 IP·port를 바꾸면 IP/TCP/UDP checksum도 일관되게 조정해야 한다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>NAT는 “private IP를 public IP로 바꾼다”보다 훨씬 많은 state를 만든다. 두 host에서 같은 connection을 보더라도 주소와 port가 다르고, 중간 table이 가득 차거나 먼저 만료되면 application log만으로 원인을 찾기 어렵다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>가용성:</strong> Conntrack table full, NAT port allocation failure, asymmetric reply는 server가 정상이어도 connect timeout/reset을 만든다.</li>
+            <li><strong>성능:</strong> 짧은 connection·공격적 retry·connection pool 미사용은 allocation churn과 state 수를 늘린다.</li>
+            <li><strong>정확성:</strong> Server log의 source IP는 NAT/LB일 수 있어 user identity나 unique client 수와 같지 않다.</li>
+            <li><strong>보안:</strong> NAT는 주소 변환이지 firewall이나 인증이 아니다. Mapping과 filtering policy를 구분해야 한다.</li>
+            <li><strong>면접:</strong> 좋은 답변은 before/after tuple, original/reply direction, state owner, timeout과 capacity 단위를 수치로 설명한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 packet 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:16%;">시점</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:55%;">CLIENT → EGRESS NAT → PUBLIC VIP → DNAT → APP</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">Tuple·state</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① socket</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">10.0.1.7:49152 → 198.51.100.20:443<br>route·ARP/NDP 후 SYN 송신</td><td style="padding:9px;border:1px solid #dbe3e8;">Client socket owner<br>local ephemeral port</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② SNAT</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">203.0.113.9:40001 → 198.51.100.20:443<br>source·checksum rewrite</td><td style="padding:9px;border:1px solid #dbe3e8;">Egress mapping A<br>original↔translated</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ DNAT</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">203.0.113.9:40001 → 10.2.1.8:8443<br>destination·checksum rewrite</td><td style="padding:9px;border:1px solid #dbe3e8;">Ingress mapping B<br>VIP→backend</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ app</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">APP accepts peer 203.0.113.9:40001<br>TLS/HTTP 처리·response 생성</td><td style="padding:9px;border:1px solid #dbe3e8;">App socket state<br>원 client tuple은 모름</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ reply</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">10.2.1.8:8443 → 203.0.113.9:40001<br>mapping B reverse → source VIP:443</td><td style="padding:9px;border:1px solid #dbe3e8;">같은 DNAT owner 필요<br>state lookup</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑥ restore</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">198.51.100.20:443 → 10.0.1.7:49152<br>mapping A reverse → client socket</td><td style="padding:9px;border:1px solid #dbe3e8;">Egress state hit<br>socket 4-tuple 일치</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>Client:</strong> DNS 결과에 connect하면 kernel이 local address·ephemeral port를 골라 socket tuple을 만든다. Port만이 아니라 source address 선택과 route도 capacity에 영향을 준다.</li>
+            <li><strong>SNAT:</strong> 첫 packet에서 external IP:port를 배정하고 original/reply tuple mapping을 기록한다. 이후 packet은 같은 mapping을 따라야 한다.</li>
+            <li><strong>DNAT:</strong> Public destination을 내부 endpoint로 바꾸지만 client source는 앞선 SNAT 주소로 보인다. 실제 시스템에서는 LB proxy가 connection을 종료할 수도 있어 NAT와 구분한다.</li>
+            <li><strong>Application:</strong> Accept한 socket의 peer는 직전 network hop이 만든 tuple이다. HTTP header의 client IP는 별도 trust 문제다.</li>
+            <li><strong>Reply:</strong> Reverse translation은 새 규칙을 추론하는 과정이 아니라 기존 state lookup이다. 다른 stateful node로 가면 mapping miss가 발생한다.</li>
+            <li><strong>완료:</strong> Application close, TCP FIN/RST, idle timeout, device policy는 서로 다른 시점에 state를 지운다. 한쪽만 먼저 지우면 stale connection이 된다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>핵심 불변식:</strong> Translation 뒤에도 protocol의 양방향 의미가 보존되어야 한다. Forward packet과 reply packet이 동일 mapping을 사용하고 checksum·timeout·filter state가 일관되어야 원 endpoint socket까지 돌아간다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Conntrack은 TCP state machine과 같지 않다</h3>
+          <p>Conntrack은 packet을 original/reply 방향으로 분류하고 protocol별 관찰 상태·timeout·NAT extension을 관리한다. TCP의 정확한 endpoint state는 각 host kernel이 소유한다. 중간 장비가 ESTABLISHED로 분류했다는 사실은 application이 accept·read·commit했다는 뜻이 아니다.</p>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:28%;">소유 상태</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">무엇을 증명하고 무엇은 증명하지 않는가</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Client socket</td><td style="padding:9px;border:1px solid #dbe3e8;">Local/remote tuple, send/receive queue, TCP sequence를 소유한다. 중간 NAT mapping 존재는 모른다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Conntrack/NAT</td><td style="padding:9px;border:1px solid #dbe3e8;">양방향 tuple과 translation·timeout을 소유한다. Application business commit은 모른다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Server socket</td><td style="padding:9px;border:1px solid #dbe3e8;">Translated peer와 local endpoint를 본다. NAT 전 source는 network metadata 없이는 복원하지 못한다.</td></tr>
+          </table>
+
+          <h3 style="font-size:18px;color:#075985;">Port capacity는 단순히 65,535가 아니다</h3>
+          <p>Host ephemeral range를 <code>R</code>, usable source IP 수를 <code>A</code>, 특정 destination·protocol에 필요한 동시 mapping을 <code>C</code>라 하면 보수적 1차 예산은 <code>A×R</code>이고 <code>C/(A×R)</code>를 utilization로 본다. 하지만 예약 port, TIME_WAIT/idle state, implementation의 mapping reuse/port-overlap, destination 분산, allocator collision 때문에 실제 capacity는 달라진다.</p>
+          <p>예를 들어 usable port가 28,000개이고 NAT IP가 2개라면 특정 hot destination에 보수적으로 약 56,000 tuple budget이 있다. Peak 40,000 active + 초당 2,000개 churn이 30초 남으면 60,000 state가 추가될 수 있어 위험하다. Retry는 실패당 새 connection을 만들면 이 churn을 곱한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Mapping과 filtering은 독립 축이다</h3>
+          <p>같은 내부 IP:port를 다른 destination에서도 같은 external mapping으로 재사용하는가와, 외부 어느 endpoint의 packet을 허용하는가는 별개다. “Cone/symmetric NAT” 한 단어보다 endpoint-independent/address-dependent/address-and-port-dependent mapping·filtering을 나눠 말하는 편이 정확하다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Failure window와 timestamp</h3>
+          <p><code>t0</code> socket bind, <code>t1</code> mapping allocate, <code>t2</code> SYN forwarded, <code>t3</code> reply hit, <code>t4</code> app response, <code>t5</code> mapping expire를 기록한다. SYN이 NAT 밖에서 보이지 않으면 route/rule/allocation을, 밖에는 보이나 reply가 없으면 remote path를, reply가 NAT에 도착했으나 안쪽에 없으면 reverse lookup/filter/asymmetry를 의심한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Tuple diagram</td><td style="padding:9px;border:1px solid #dbe3e8;">각 hop의 pre/post source·destination IP:port와 protocol을 표로 남긴다. “NAT를 지난다”만 쓰면 관측점을 잃는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Capacity budget</td><td style="padding:9px;border:1px solid #dbe3e8;">NAT IP별·destination별 active mapping, allocation rate/failure, port utilization과 state age를 측정한다. 평균보다 hot destination과 peak churn을 본다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Connection reuse</td><td style="padding:9px;border:1px solid #dbe3e8;">Bounded pool과 keep-alive/multiplexing으로 mapping churn을 낮추되 stale idle socket 검증, max lifetime, deadline과 drain을 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">HA/asymmetry</td><td style="padding:9px;border:1px solid #dbe3e8;">양방향 path를 강제하거나 NAT state를 동기화한다. Failover가 기존 flow를 보존하는지 신규 flow만 복구하는지 명시한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Timeout alignment</td><td style="padding:9px;border:1px solid #dbe3e8;">Application/LB/NAT/firewall idle timeout을 비교하고 가장 짧은 state owner를 안다. Keepalive 주기는 비용과 배터리까지 고려해 그보다 안전하게 짧게 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Inbound DNAT</td><td style="padding:9px;border:1px solid #dbe3e8;">Listener·route·DNAT·filter·backend bind를 별도 검증한다. Public port 노출을 인증·authorization으로 착각하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Logging/privacy</td><td style="padding:9px;border:1px solid #dbe3e8;">Translation ID 또는 pre/post tuple을 제한된 보존 기간으로 기록하고 user identity는 별도 authenticated ID로 연결한다. Public IP 하나를 한 사람으로 보지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Backpressure</td><td style="padding:9px;border:1px solid #dbe3e8;">Allocation failure 전 connection creation rate와 retry를 제한하고 pool queue 상한·load shedding을 둔다. NAT IP 추가는 즉시 원인 제거가 아니라 capacity 확장이다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> Linux conntrack timeout·bucket·max 기본값은 kernel/config/net namespace에 따라 달라지고 cloud NAT는 port block allocation·destination별 reuse·metric 이름이 다르다. 오늘 공식 문서의 숫자를 운영값으로 복사하지 말고 실제 sysctl, appliance/cloud 문서와 runtime metric을 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">일부 outbound connect timeout, 특정 destination만 실패, NAT allocation error, conntrack count/max 근접, inbound published port만 불통, long-idle connection 첫 request reset, failover 뒤 기존 flow 단절.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">정확한 timestamp·request ID, 양쪽 packet capture, pre/post 5-tuple, route/rule, conntrack count/max/insertion drop, NAT IP별 allocation·port usage·failure, protocol/state/age, client socket/TIME_WAIT, destination별 connect rate와 retry.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">Ephemeral/NAT port exhaustion, conntrack table full, idle timeout mismatch, missing DNAT/filter rule, asymmetric reply, stale mapping, hot destination, retry storm, source IP pool imbalance, checksum/fragment issue, backend bind·route 오류.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">실패 cohort와 hot destination을 제한하고 신규 connection/retry rate를 낮춘다. Healthy existing connection은 유지하고 alternate NAT IP/path를 작은 canary에만 적용한다. 양방향 capture로 state owner를 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 NAT/routing/timeout/pool config로 rollback, 필요한 경우 capacity를 점진 추가하고 fresh connection 성공을 확인한다. Allocation failure·count·port utilization·retry가 baseline으로 돌아온 뒤 traffic을 확대한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">Conntrack table 전체 flush, timeout 무조건 확대, retry·pool 무제한 증가, firewall 전면 해제, 모든 NAT node 동시 재시작, public IP를 user identity로 단정, packet capture에 payload/secret을 무제한 저장하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: Docker DNAT와 source tuple 변화를 증거로 확인</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop/Engine과 Compose, 저장소 root. 시작 전에 container direct path와 host published port path에서 API가 볼 source IP:port가 같은지 예측한다. Docker Desktop은 Linux host와 구현 경계가 다를 수 있으므로 관찰 결과를 우선한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 주소 확인 (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>make doctor
+make up
+make ps
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client ip addr show eth0
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client ip route</code></pre>
+          <p><strong>예상:</strong> Client container의 IP와 default gateway가 보인다. 이것이 client namespace의 source address/route이며 host의 localhost 주소와 다르다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · Direct tuple과 ephemeral port 관찰 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sS http://api:8000/headers
+
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client sh -c 'for i in 1 2 3 4 5; do curl -sS http://api:8000/headers; done'</code></pre>
+          <p><strong>예상:</strong> JSON의 <code>client.host</code>는 client container IP이고 <code>client.port</code>는 요청마다 달라질 수 있다. 새 TCP connection마다 local ephemeral port를 새로 고른 증거다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · Published port DNAT 경로 비교 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml port api 8000
+curl -sS http://localhost:18000/headers
+
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec api tcpdump -ni any -c 6 'tcp port 8000'</code></pre>
+          <p><strong>예상:</strong> Host의 18000이 container 8000으로 publish된다. API가 본 peer는 direct container request와 다를 수 있다. 마지막 tcpdump는 다음 단계 요청과 함께 실행해 translated path의 source/destination tuple을 확인한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 실패 주입: DNAT backend 중지 (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml stop api
+curl -sv --max-time 5 http://localhost:18000/headers
+docker compose -f labs/basic-network-observability/docker-compose.yml start api</code></pre>
+          <p><strong>예상:</strong> Public host port 설정이 남아 있어도 backend listener가 없으면 요청은 성공하지 않는다. DNAT rule 존재와 backend readiness는 별도 불변식이다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · 복구와 cleanup (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>curl -fsS http://localhost:18000/headers &gt;/dev/null
+make ps
+make down</code></pre>
+          <p><strong>자주 나는 오류:</strong> Host port 충돌이면 <code>make ps</code>와 사용 중 listener를 확인한다. Tcpdump가 계속 기다리면 다른 terminal에서 curl을 실행하고 <code>-c 6</code> 종료를 기다린다. Docker Desktop에서 peer가 VM gateway로 보이는 것은 구현 경계의 증거이지 실패가 아니다. Cleanup 후 container/network가 내려갔는지 확인한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>NAT와 proxy를 섞지 않는다.</strong> NAT는 packet header를 변환하고 proxy는 endpoint가 되어 새 connection을 만들 수 있다.</li>
+            <li><strong>NAT는 firewall이 아니다.</strong> Mapping behavior와 inbound filtering policy는 별개다.</li>
+            <li><strong>Host ephemeral port와 NAT external port는 다른 allocator다.</strong></li>
+            <li><strong>65,535를 곧 capacity로 쓰지 않는다.</strong> 예약 범위·destination·protocol·state age·reuse 정책을 포함한다.</li>
+            <li><strong>Conntrack ESTABLISHED는 application 성공이 아니다.</strong></li>
+            <li><strong>Table max만 늘리면 memory·lookup chain·복구 시간이 커질 수 있다.</strong></li>
+            <li><strong>Idle timeout 확대는 stale state와 port 점유를 늘린다.</strong></li>
+            <li><strong>Failover 장비가 config만 공유해도 기존 flow는 끊길 수 있다.</strong> Runtime mapping 동기화 여부를 본다.</li>
+            <li><strong>Packet capture 관측점마다 tuple이 다르다.</strong> Interface와 NAT 전/후 hook 위치를 표시한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“SNAT packet이 나갔다가 돌아오는 전 과정을 설명하세요.”</strong><br>좋은 답변 구조: Client bind/route → pre-NAT 5-tuple → mapping allocation → checksum rewrite → server peer → reply tuple → reverse lookup → socket demux → timeout/asymmetry failure.</li>
+            <li><strong>“NAT gateway port exhaustion을 어떻게 계산하고 진단합니까?”</strong><br>좋은 답변 구조: NAT IP·usable port·destination·protocol 가정 → active+churn×lifetime → allocation metric/conntrack evidence → retry/pool 원인 → rate limit/reuse/capacity canary → rollback.</li>
+            <li><strong>“DNAT 서비스가 간헐적으로 timeout입니다. 계층별 가설을 세우세요.”</strong><br>좋은 답변 구조: DNS/VIP route → listener/rule/filter → mapping/state owner → backend route/bind/health → reply asymmetry → 양방향 pcap/timestamp → safe cohort isolation.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>L4와 L7 LB의 대표 selection granularity는 무엇인가?</li>
+            <li>Health check가 green이어도 user request가 실패할 수 있는 이유는?</li>
+            <li>Source-IP stickiness의 두 가지 실무 문제는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① L4는 flow/connection, L7은 HTTP request/stream 단위가 대표적이다. ② Check는 별도 source·path·protocol·시점의 synthetic control path라 실제 dependency와 queue를 놓칠 수 있다. ③ NAT/proxy가 여러 user를 한 IP로 묶고 hot key가 한 backend를 과부하시킨다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Client, NAT, server가 같은 TCP connection을 서로 다른 tuple로 보는 이유는?</li>
+            <li>Conntrack state가 있는데도 application 요청이 실패할 수 있는 이유는?</li>
+            <li>Usable port 28,000개×NAT IP 2개 환경에서 active 40,000, 초당 2,000 churn이 30초 유지되면 왜 위험한가?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① NAT가 source/destination IP:port를 rewrite하고 각 endpoint는 자기 관측점의 peer만 보기 때문이다. ② Conntrack은 network flow 관찰 state이지 server accept/read/dependency/commit 성공이 아니기 때문이다. ③ 보수적 56,000 budget에 active 40,000과 잠재 60,000 churn state가 겹쳐 allocation 여유를 넘을 수 있다. 문항당 정의 1점, state/flow 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc3022.html" style="color:#0369a1;">RFC 3022 · Traditional NAT/NAPT, tuple translation과 제약</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc4787.html" style="color:#0369a1;">RFC 4787 · UDP NAT mapping·filtering·timer·hairpinning behavior</a></li>
+            <li><a href="https://www.rfc-editor.org/rfc/rfc7857.html" style="color:#0369a1;">RFC 7857 · TCP NAT tracking, port overlap과 pooling 업데이트</a></li>
+            <li><a href="https://docs.kernel.org/networking/nf_conntrack-sysctl.html" style="color:#0369a1;">Linux Kernel 공식 문서 · conntrack count/max/bucket과 protocol timeout</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 32</strong><br>
+            <span>VPC/subnet/route table/NAT gateway — cloud의 logical router와 subnet 경계를 실제 packet next hop, control-plane route, AZ failure·비용 경계로 연결합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
