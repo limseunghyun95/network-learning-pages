@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 32</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">PROXY · LB · NAT · CLOUD NETWORK · WEEK 5 / DAY 32</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">VPC/subnet/route table/NAT gateway</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">논리 네트워크를 packet path·state owner·AZ 장애·비용으로 해부한다 · 개념 75분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            VPC는 격리된 논리 주소 공간, subnet은 한 Availability Zone 안의 CIDR 구간, route table은 목적지 prefix를 target에 연결하는 control-plane 규칙이다. Private subnet의 인터넷 egress는 보통 <strong>private route → 같은 AZ NAT gateway → public route → internet gateway</strong>의 두 route table과 stateful NAT를 모두 통과해야 한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">VPC</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Virtual Private Cloud. Cloud provider의 물리망 위에 만든 tenant별 논리 네트워크다. CIDR, route, gateway, policy 객체가 data path를 제어한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">CIDR</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">주소와 prefix length로 범위를 표현하는 방식이다. <code>10.20.1.0/24</code>는 앞 24bit가 network prefix라는 뜻이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Subnet</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">VPC CIDR의 겹치지 않는 일부 주소 구간이다. AWS에서는 subnet 하나가 하나의 Availability Zone에 속한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Availability Zone</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Region 안의 독립 장애 영역이다. 물리 위치 이름이 아니라 실패 상관관계를 낮추기 위한 배치 경계로 이해한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Route table</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">목적지 prefix와 next target의 목록이다. AWS subnet은 한 시점에 하나의 route table과 연결되고 여러 subnet은 같은 table을 공유할 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Longest prefix match</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">목적지와 일치하는 route 중 prefix length가 가장 긴, 즉 가장 구체적인 route를 고르는 규칙이다. <code>/24</code>는 겹치는 <code>/0</code>보다 우선한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Target / next hop</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">선택된 route가 packet을 넘길 논리 객체다. local, NAT gateway, internet gateway, network interface, peering 등이 될 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Internet gateway</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">VPC와 인터넷 사이의 관리형 gateway다. Route만 있다고 모든 instance가 인터넷에 나가는 것은 아니며 public address와 policy도 맞아야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">NAT gateway</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Private source가 외부로 connection을 시작하도록 source address/port를 변환하고 reply state를 유지하는 관리형 middlebox다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Public/private subnet</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">AWS 문맥에서 public subnet은 internet gateway로 직접 향하는 route가 있고, private subnet은 직접 route가 없다. 이름 tag가 성질을 만들지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Data plane</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">실제 packet을 lookup·rewrite·forward하는 실행 경로다. Control plane 변경이 data plane 전체에 반영되기까지 짧은 convergence window가 있을 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Flow log</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Interface/VPC traffic의 tuple, bytes, accept/reject 같은 metadata 기록이다. Payload나 application 성공을 증명하지는 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>Cloud network 장애는 “서버가 살아 있다”와 “요청이 도달한다” 사이의 control-plane 객체 하나만 틀려도 발생한다. Route, NAT, internet gateway, policy, DNS를 한 덩어리로 보면 안전한 복구가 어렵다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>가용성:</strong> 하나의 NAT gateway를 여러 AZ가 공유하면 그 NAT의 AZ 장애가 다른 AZ의 egress까지 끊을 수 있다.</li>
+            <li><strong>정확성:</strong> Route table은 응답의 대칭성과 NAT state owner까지 자동 보장하지 않는다. 양방향 path를 따로 그려야 한다.</li>
+            <li><strong>성능·용량:</strong> NAT gateway는 bandwidth, packets per second, destination별 port allocation이라는 서로 다른 병목을 가진다.</li>
+            <li><strong>비용:</strong> Cross-AZ path, NAT 처리량, internet egress 비용은 아키텍처 선택과 직접 연결된다. Gateway endpoint 등 우회 경로가 더 안전하고 저렴할 수 있다.</li>
+            <li><strong>면접:</strong> 좋은 답변은 “public/private” 라벨이 아니라 route association, longest prefix match, target state, source translation과 failure domain을 설명한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:15%;">단계</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:56%;">PRIVATE-A → NAT-A(PUBLIC-A) → IGW → INTERNET</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">상태 소유자</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① resolve</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">app.example → 198.51.100.20<br>socket connect 시작</td><td style="padding:9px;border:1px solid #dbe3e8;">Resolver cache<br>client socket</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② route A</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;"><code>0.0.0.0/0 → nat-a</code><br>더 구체적인 route가 없음을 확인</td><td style="padding:9px;border:1px solid #dbe3e8;">Private subnet<br>route association</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ SNAT</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">10.20.1.10:49152 → EIP:40001<br>NAT mapping 생성</td><td style="padding:9px;border:1px solid #dbe3e8;">NAT-A flow state<br>port allocator</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ route B</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;"><code>0.0.0.0/0 → igw</code><br>Public subnet route</td><td style="padding:9px;border:1px solid #dbe3e8;">Public subnet<br>route association</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ reply</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">198.51.100.20:443 → EIP:40001<br>IGW → NAT-A reverse lookup</td><td style="padding:9px;border:1px solid #dbe3e8;">같은 NAT state<br>필요</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑥ deliver</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">198.51.100.20:443 → 10.20.1.10:49152<br>socket queue에 도착</td><td style="padding:9px;border:1px solid #dbe3e8;">Client kernel<br>application</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>DNS:</strong> 목적지 IP를 얻지만 어느 route가 선택될지는 아직 결정하지 않는다.</li>
+            <li><strong>Private route lookup:</strong> 모든 일치 route 중 longest prefix match로 target을 고른다. Endpoint나 firewall appliance로 향하는 더 구체적인 route가 있으면 default NAT route보다 우선한다.</li>
+            <li><strong>NAT:</strong> 첫 packet에서 mapping과 port state를 만들고 source tuple을 바꾼다. 이 시점이 “외부에서 보이는 source”의 경계다.</li>
+            <li><strong>Public route lookup:</strong> NAT가 있는 subnet도 internet gateway로 향하는 route가 필요하다. Private table만 고쳐서는 충분하지 않다.</li>
+            <li><strong>Reply:</strong> Reply는 기존 mapping을 찾아야 하므로 NAT AZ와 state owner가 경로의 불변식이다.</li>
+            <li><strong>성공 확정:</strong> Flow log ACCEPT나 SYN-ACK은 network 단계의 증거일 뿐이다. TLS/HTTP와 business commit은 뒤의 별도 성공 조건이다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>핵심 불변식:</strong> Source subnet이 의도한 route table과 연결되고, 선택 target이 Available이며, NAT와 public subnet의 다음 route가 유효하고, reply가 동일 NAT state로 돌아와야 한다. 이 중 하나라도 깨지면 application은 정상이어도 egress는 실패한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">주소 공간과 격리</h3>
+          <p>VPC의 private CIDR는 인터넷 전역에서 유일하지 않다. 격리는 주소 자체가 아니라 provider의 virtual routing/forwarding context, tenant identifier, encapsulation과 policy가 만든다. 두 VPC가 같은 <code>10.0.0.0/16</code>을 써도 독립적으로 동작하지만 peering·VPN·합병 시 overlap 때문에 route를 명확히 만들 수 없다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Longest prefix match와 control-plane convergence</h3>
+          <p>Route lookup을 단순화하면 destination IP와 각 prefix를 bitwise 비교하고 가장 긴 match를 선택한다. <code>10.20.0.0/16 → local</code>, <code>10.20.2.0/24 → appliance</code>, <code>0.0.0.0/0 → NAT</code>가 있으면 10.20.2.7은 <code>/24</code>로 간다. Route 변경 API 성공은 control plane이 요청을 수락했다는 뜻이며, 기존 flow와 모든 data-plane replica가 즉시 같은 결과를 보장한다는 뜻은 아니다. 변경 전후의 짧은 failure window를 canary로 관찰한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Subnet은 broadcast LAN과 동일하지 않다</h3>
+          <p>전통 Ethernet subnet에서는 ARP/ND와 broadcast domain을 떠올리지만 cloud VPC는 provider가 neighbor resolution과 forwarding을 가상화한다. “같은 subnet이면 switch 하나에서 broadcast”라고 단정하면 틀린다. 중요한 것은 source interface, destination address, subnet association, local route와 provider data plane이다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">NAT capacity model</h3>
+          <p>AWS 공식 문서의 현재 수치에 따르면 NAT gateway는 각 IPv4 address마다 unique destination(IP, port, protocol)당 최대 55,000 simultaneous connection을 지원한다. 이를 모든 destination을 합친 무한 capacity로 오해하면 안 된다. <code>required state ≈ active + connection_rate × state_lifetime</code>로 hot destination별 peak를 계산하고 <code>ErrorPortAllocation</code>, <code>IdleTimeoutCount</code>, packets/bytes/drop과 retry rate를 함께 본다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Data path와 비용 path</h3>
+          <p>Private-A가 NAT-B를 쓰면 packet이 AZ 경계를 왕복할 수 있다. 이는 NAT-AZ 장애 상관관계와 cross-AZ data transfer 비용을 만든다. Object storage가 VPC endpoint를 지원한다면 NAT를 거치지 않는 더 구체적인 endpoint route로 state·비용·internet exposure를 줄일 수 있다. 다만 DNS, endpoint policy와 route association이 새 control plane이 된다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">CIDR 계획</td><td style="padding:9px;border:1px solid #dbe3e8;">현재 host 수만 맞추지 말고 AZ·환경·조직·향후 연결을 위한 비중첩 block을 예약한다. Overlap은 나중에 renumbering/proxy를 강제한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">AZ별 NAT</td><td style="padding:9px;border:1px solid #dbe3e8;">Active AZ의 private subnet이 같은 AZ NAT를 쓰게 한다. 단일 NAT 비용 절감과 AZ 독립성·cross-AZ 비용의 trade-off를 명시한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Route ownership</td><td style="padding:9px;border:1px solid #dbe3e8;">Subnet→route table association과 각 route owner를 IaC로 관리하고 diff·approval·rollback을 남긴다. Main table의 암묵 연결에 기대지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Specific route review</td><td style="padding:9px;border:1px solid #dbe3e8;">Default route만 보지 말고 더 구체적인 prefix·prefix list·propagated route가 우선하는지 검토한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">NAT 용량</td><td style="padding:9px;border:1px solid #dbe3e8;">NAT ID·AZ·destination별 connection 수, allocation error, idle timeout, bytes/packets를 측정한다. Pool·keep-alive·backoff로 churn을 먼저 줄인다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Endpoint 우회</td><td style="padding:9px;border:1px solid #dbe3e8;">지원 service는 private endpoint를 검토한다. 비용 절감뿐 아니라 NAT dependency 감소 효과가 있지만 endpoint policy와 private DNS를 함께 시험한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Change rollout</td><td style="padding:9px;border:1px solid #dbe3e8;">새 route table을 소수 canary subnet에 연결하고 DNS→TCP→TLS→HTTP probe와 flow log를 본 뒤 확대한다. 기존 flow 단절을 별도 관찰한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">Source subnet/AZ, selected egress IP, NAT ID, destination, request timestamp를 연결한다. Flow log ACCEPT를 application success와 혼동하지 않는다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/provider 차이:</strong> VPC·VNet의 route precedence, system route, managed NAT의 port allocation·idle timeout·HA 단위·metric 이름은 provider와 product version마다 다르다. 오늘 AWS 수치를 GCP/Azure나 NAT instance에 그대로 적용하지 말고 해당 provider 공식 문서와 runtime metric을 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">특정 subnet/AZ만 인터넷 timeout, 특정 destination만 신규 connection 실패, route 변경 뒤 간헐 drop, long-idle connection reset, NAT 비용·cross-AZ bytes 급증, endpoint 전환 뒤 DNS/403 오류.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">정확한 timestamp·source ENI/subnet/AZ·destination tuple, subnet-route association, 모든 matching prefix와 target state, private/public 양쪽 route, flow log ACCEPT/REJECT, NAT ErrorPortAllocation·IdleTimeoutCount·drops·bytes, selected public IP, DNS/TCP/TLS 시간.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">잘못된 association, 더 구체적인 blackhole route, NAT/IGW target 미준비, public subnet route 누락, cross-AZ NAT 장애, port exhaustion, idle timeout, NACL/SG 차단, return asymmetry, overlapping CIDR, endpoint policy/private DNS 오류, retry storm.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">실패 cohort의 신규 connection/retry를 제한하고 healthy flow는 유지한다. 한 canary subnet만 검증된 route table 또는 같은 AZ healthy NAT로 전환한 뒤 synthetic probe와 flow log를 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 route association/prefix/target으로 되돌리고 IaC state를 일치시킨다. Fresh connection과 기존 connection을 분리 검증하고 allocation error·latency·drop·cost path가 baseline으로 돌아온 뒤 확대한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">모든 subnet route 동시 교체, 0.0.0.0/0을 임의 IGW로 변경, SG/NACL 전면 허용, NAT 전체 삭제·재생성, retry 무제한 증가, flow log ACCEPT만 보고 완료 선언, 장애 중 CIDR을 즉흥 재설계하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: route 선택과 blackhole 실패를 namespace에서 재현</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop/Engine과 Compose, 저장소 root. Client container에는 <code>NET_ADMIN</code> capability가 있다. 실행 전에 <code>api</code>의 IP와 default route 중 어느 route가 선택될지 예측한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 control plane 확인 (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>make doctor
+make up
+make ps
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client ip -4 addr show eth0
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client ip route</code></pre>
+          <p><strong>예상:</strong> Connected prefix와 default gateway가 보인다. 이 table이 cloud subnet route table의 축소 모델이다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · 실제 lookup 증거 (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>API_IP=$(docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec -T client getent hosts api | awk 'NR==1{print $1}')
+echo "$API_IP"
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client ip route get "$API_IP"
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -fsS http://api:8000/headers</code></pre>
+          <p><strong>예상:</strong> API destination에는 connected route가 default보다 구체적이므로 직접 interface가 선택되고 HTTP 200이 온다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · 실패 주입: /32 blackhole (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client ip route add blackhole "$API_IP/32"
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client ip route get "$API_IP"
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sv --max-time 4 http://api:8000/headers</code></pre>
+          <p><strong>예상:</strong> 더 구체적인 <code>/32</code> blackhole이 connected prefix보다 우선해 즉시 unreachable/timeout이 난다. DNS와 API process는 정상이어도 route만으로 실패한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · rollback과 관찰 (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client ip route del blackhole "$API_IP/32"
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client ip route get "$API_IP"
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -fsS http://api:8000/headers</code></pre>
+          <p><strong>예상:</strong> Route 삭제 직후 connected route가 다시 선택되고 fresh connection이 성공한다. 이것이 작은 blast radius의 route rollback이다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · 오류 처리와 cleanup (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code># add가 File exists라면 먼저 정확한 /32만 삭제한다.
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client ip route del blackhole "$API_IP/32" 2&gt;/dev/null || true
+make down</code></pre>
+          <p><strong>자주 나는 오류:</strong> <code>Operation not permitted</code>이면 compose의 client <code>NET_ADMIN</code> 설정과 container 재생성을 확인한다. <code>API_IP</code>가 비어 있으면 <code>make up</code> 후 DNS를 확인한다. Cleanup은 broad route flush가 아니라 실습에서 추가한 정확한 <code>/32</code>만 삭제한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Subnet 이름이 public/private를 결정하지 않는다.</strong> 실제 route target과 public address 조건을 본다.</li>
+            <li><strong>Route는 양방향 connection을 자동 보장하지 않는다.</strong> Reply path와 stateful middlebox를 별도로 확인한다.</li>
+            <li><strong>Default route만 보면 안 된다.</strong> 더 구체적인 route가 항상 우선한다.</li>
+            <li><strong>NAT gateway를 public subnet에 두는 것만으로 끝나지 않는다.</strong> Public table의 IGW route도 필요하다.</li>
+            <li><strong>NAT는 inbound publish나 보안 인증 기능이 아니다.</strong></li>
+            <li><strong>Single NAT는 비용은 줄여도 AZ failure domain과 cross-AZ 비용을 키울 수 있다.</strong></li>
+            <li><strong>Flow log ACCEPT는 TLS/HTTP/DB commit 성공이 아니다.</strong></li>
+            <li><strong>Route API 성공과 즉시 전역 수렴은 같은 약속이 아니다.</strong> Canary와 timestamp가 필요하다.</li>
+            <li><strong>IPv4 <code>0.0.0.0/0</code>는 IPv6 <code>::/0</code>를 포함하지 않는다.</strong></li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“Private subnet의 request가 인터넷 API에 도달하는 전체 경로를 설명하세요.”</strong><br>좋은 답변 구조: DNS → source ENI/subnet → longest prefix route → same-AZ NAT mapping → public subnet route → IGW → reply state → socket → TLS/HTTP 성공 조건.</li>
+            <li><strong>“NAT gateway를 AZ마다 둘지 하나만 둘지 설계하세요.”</strong><br>좋은 답변 구조: RTO/가용성 요구 → traffic/connection 수치 → AZ 장애 상관관계 → cross-AZ/NAT 비용 → endpoint 대안 → metric·canary·rollback.</li>
+            <li><strong>“Route 변경 후 특정 destination만 timeout입니다. 어떻게 진단합니까?”</strong><br>좋은 답변 구조: source cohort·timestamp → 모든 matching prefix → longest match/target state → forward/reply flow log → NAT allocation/policy → safe one-subnet rollback → 대안.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>SNAT의 forward tuple과 reply 역변환에 필요한 핵심 state는 무엇인가?</li>
+            <li>Conntrack ESTABLISHED가 application 성공을 증명하지 못하는 이유는?</li>
+            <li>NAT port exhaustion을 active connection만으로 계산하면 놓치는 항은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Original/reply tuple과 NAT mapping·timeout이다. ② 중간 network state이며 server accept/read와 business commit은 endpoint/application 소유이기 때문이다. ③ Connection creation rate×state lifetime의 churn, retry, destination별 hot spot을 놓친다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li><code>/0 → NAT</code>와 <code>/24 → appliance</code>가 모두 일치하면 어느 route가 선택되며 왜인가?</li>
+            <li>Private-A가 NAT-B 하나를 공유할 때 생기는 가용성·비용 위험은?</li>
+            <li>Flow log ACCEPT인데 curl이 실패할 수 있는 세 가지 후속 지점을 말하라.</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 더 긴 <code>/24</code>가 longest prefix match로 선택된다. ② NAT-B AZ 장애가 A egress도 끊고 cross-AZ 왕복·비용을 만든다. ③ NAT reverse state/port, TCP queue·timeout, TLS 인증/HTTP/application dependency 중 세 가지를 들 수 있다. 문항당 정의 1점, 내부 흐름 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/subnet-route-tables.html" style="color:#0369a1;">AWS VPC 공식 문서 · Subnet route table, local route, longest prefix match</a></li>
+            <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-basics.html" style="color:#0369a1;">AWS VPC 공식 문서 · NAT gateway AZ, bandwidth/PPS, destination별 connection capacity</a></li>
+            <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-troubleshooting.html" style="color:#0369a1;">AWS VPC 공식 문서 · NAT route, idle timeout, port exhaustion 장애 대응</a></li>
+            <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/creating-alarms-nat-gateway.html" style="color:#0369a1;">AWS VPC 공식 문서 · ErrorPortAllocation과 CloudWatch alarm</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 33</strong><br>
+            <span>firewall/security group/NACL 경계 — stateful·stateless policy, direction, default deny와 return traffic을 packet evidence로 구분합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

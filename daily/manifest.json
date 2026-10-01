@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-09-01T09:01:15+09:00",
+  "updatedAt": "2026-10-01T09:01:28+09:00",
   "lessons": [
     {
       "day": 1,
@@ -284,6 +284,15 @@
       "path": "day-31.html",
       "kind": "lesson",
       "publishedAt": "2026-09-01T09:01:15+09:00"
+    },
+    {
+      "day": 32,
+      "week": 5,
+      "title": "VPC/subnet/route table/NAT gateway",
+      "summary": "VPC·subnet·route table을 longest prefix match와 control/data plane으로 해부하고 same-AZ NAT gateway의 state, capacity, 비용, 장애 경계를 실무적으로 진단합니다.",
+      "path": "day-32.html",
+      "kind": "lesson",
+      "publishedAt": "2026-10-01T09:01:28+09:00"
     }
   ]
 }
