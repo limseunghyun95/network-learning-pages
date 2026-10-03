@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-10-01T09:01:28+09:00",
+  "updatedAt": "2026-10-03T09:00:54+09:00",
   "lessons": [
     {
       "day": 1,
@@ -293,6 +293,15 @@
       "path": "day-32.html",
       "kind": "lesson",
       "publishedAt": "2026-10-01T09:01:28+09:00"
+    },
+    {
+      "day": 33,
+      "week": 5,
+      "title": "firewall/security group/NACL 경계",
+      "summary": "Security Group과 NACL을 ENI·subnet 경계, stateful·stateless rule evaluation, 양방향 tuple과 conntrack failure window로 해부하고 안전한 변경·장애 대응을 실습합니다.",
+      "path": "day-33.html",
+      "kind": "lesson",
+      "publishedAt": "2026-10-03T09:00:54+09:00"
     }
   ]
 }

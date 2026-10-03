@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 33</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">PROXY · LB · NAT · CLOUD NETWORK · WEEK 5 / DAY 33</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">firewall/security group/NACL 경계</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">state owner·rule evaluation·return traffic·failure window를 packet 단위로 추적한다 · 개념 75분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Security Group은 ENI/resource 경계의 <strong>stateful allow-list</strong>이고, Network ACL은 subnet 경계의 <strong>stateless ordered allow/deny-list</strong>다. 요청과 응답이 각 경계에서 어떤 규칙과 connection state로 허용되는지 양방향으로 증명해야 한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Firewall</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Packet 또는 connection metadata를 규칙과 비교해 통과·차단을 결정하는 경계다. 암호화나 사용자 인증을 자동 제공하지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">5-tuple</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Source IP·source port·destination IP·destination port·protocol의 조합이다. TCP/UDP flow를 구분하는 기본 열쇠다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Ingress / egress</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">경계 안으로 들어오는 방향과 밖으로 나가는 방향이다. 같은 packet도 어느 경계를 기준으로 보느냐에 따라 이름이 달라진다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Stateful</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">첫 flow의 상태를 기억하고 그 응답을 기존 connection의 일부로 판단한다. AWS Security Group은 connection tracking을 사용한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Stateless</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">각 방향의 packet을 독립적으로 평가한다. Request를 허용해도 reply 방향 규칙이 없으면 응답은 차단된다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Security Group</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">AWS의 virtual firewall. ENI를 통해 resource에 적용되며 allow 규칙만 갖고 모든 규칙을 합산 평가한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">NACL</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Network Access Control List. Subnet과 연결되며 inbound/outbound 규칙을 번호가 낮은 순서로 평가해 첫 match의 allow/deny를 적용한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">ENI</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Elastic Network Interface. IP·MAC·Security Group이 연결되는 가상 network interface다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Implicit deny</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">허용 규칙에 match하지 않은 traffic을 기본 차단하는 원칙이다. “규칙이 없다”는 “허용”이 아니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Ephemeral port</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client OS가 connection마다 임시로 고르는 source port다. Stateless ACL의 reply 규칙은 이 범위를 고려해야 하며 실제 범위는 OS 설정에서 확인한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Control/Data plane</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">규칙을 생성·배포하는 관리 경로와 실제 packet을 평가하는 실행 경로다. API 성공과 모든 packet의 즉시 동일 동작은 구분한다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>“방화벽을 열었다”는 말만으로는 부족하다. 어느 경계, 어느 방향, 어느 protocol·port·identity, 신규 flow인지 기존 tracked flow인지가 빠지면 장애와 노출을 동시에 만들 수 있다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>가용성:</strong> NACL reply ephemeral port 누락은 server가 정상이어도 client timeout을 만든다.</li>
+            <li><strong>보안:</strong> 넓은 CIDR 허용은 임시 복구처럼 보여도 lateral movement와 internet exposure의 영구 경로가 된다.</li>
+            <li><strong>정확성:</strong> Security Group rule 삭제 뒤 tracked connection은 즉시 끊기지 않을 수 있다. 신규·기존 flow를 나눠 검증해야 한다.</li>
+            <li><strong>용량:</strong> Stateful firewall의 conntrack table은 유한하다. Long-idle connection과 retry storm은 규칙이 맞아도 신규 flow drop을 만든다.</li>
+            <li><strong>면접:</strong> 좋은 답변은 “SG는 stateful” 암기에서 끝나지 않고 상태 소유자, rule evaluation, reply path, 관찰 증거와 rollback을 연결한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:15%;">단계</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:56%;">CLIENT → SUBNET/NACL → MIDDLEBOX → NACL/SUBNET → APP</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">상태·판정 소유자</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">① resolve</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">DNS → destination IP<br>socket source port 선택</td><td style="padding:9px;border:1px solid #dbe3e8;">Resolver·client kernel</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">② SG out</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">Client ENI SG egress allow?<br>신규 connection state 후보</td><td style="padding:9px;border:1px solid #dbe3e8;">Source ENI SG·conntrack</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">③ NACL out</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">Source subnet outbound<br>낮은 번호부터 첫 match</td><td style="padding:9px;border:1px solid #dbe3e8;">Source subnet NACL</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">④ middle</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">Route → NAT/LB/firewall<br>tuple rewrite·termination 가능</td><td style="padding:9px;border:1px solid #dbe3e8;">각 middlebox state</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑤ NACL in</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">Destination subnet inbound<br>source·destination port 평가</td><td style="padding:9px;border:1px solid #dbe3e8;">Destination subnet NACL</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑥ SG in</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">App ENI SG ingress allow?<br>SYN이 listen queue로 이동</td><td style="padding:9px;border:1px solid #dbe3e8;">Destination ENI SG·kernel</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">⑦ reply</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">APP → SG state allow → NACL explicit allow<br>역방향으로 client queue 도착</td><td style="padding:9px;border:1px solid #dbe3e8;">SG tracked state + 양쪽 NACL</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>DNS·socket:</strong> Client는 destination IP와 ephemeral source port를 정한다. 아직 어떤 firewall도 application 성공을 보장하지 않는다.</li>
+            <li><strong>Source SG:</strong> 신규 egress가 allow rule에 match하면 5-tuple 기반 state가 추적될 수 있다.</li>
+            <li><strong>Source NACL:</strong> Stateless이므로 이 outbound packet 자체를 rule number 순서로 평가한다.</li>
+            <li><strong>Middlebox:</strong> NAT는 tuple을 바꾸고, proxy/LB는 connection을 종료해 새 upstream flow를 만든다. 따라서 다음 경계가 보는 source가 달라질 수 있다.</li>
+            <li><strong>Destination NACL·SG:</strong> NACL은 subnet ingress를, SG는 ENI ingress를 평가한다. 둘 중 하나라도 차단하면 socket까지 도달하지 않는다.</li>
+            <li><strong>Reply:</strong> SG는 tracked response를 자동 허용하지만 NACL은 outbound와 반대편 inbound에 explicit rule이 필요하다.</li>
+            <li><strong>성공 확정:</strong> TCP handshake는 network success일 뿐이다. TLS, HTTP response, downstream commit은 별도 owner와 timestamp로 확인한다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>핵심 불변식:</strong> Forward와 reply가 동일한 stateful owner가 이해할 수 있는 path를 지나고, 모든 stateless 경계에서 각 방향 tuple이 명시적으로 허용되며, 최종 socket이 listen·queue capacity를 가져야 한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Rule evaluation은 자료구조 문제다</h3>
+          <p>Security Group은 여러 allow rule의 합집합으로 판단하므로 순서가 없다. NACL은 rule number가 작은 것부터 first match를 적용하므로 <code>100 DENY</code>가 <code>200 ALLOW</code>를 가릴 수 있다. 구현은 prefix lookup, protocol/port interval, direction metadata를 최적화하지만 운영자는 최종 판정 의미를 기준으로 사고해야 한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Connection tracking과 state transition</h3>
+          <p>TCP의 SYN → SYN-ACK → ACK → ESTABLISHED → FIN/RST 상태와 firewall의 tracked state는 관련 있지만 동일한 객체는 아니다. AWS SG는 traffic의 connection state를 이용해 reply를 허용하고 instance별 tracking allowance를 가진다. State가 남아 있는 동안 rule 변경이 기존 flow를 즉시 끊지 않을 수 있으며, allowance가 고갈되면 신규 packet이 drop될 수 있다. <code>conntrack_allowance_available</code>와 신규 connection failure를 함께 본다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Stateless reply와 ephemeral range</h3>
+          <p>Client <code>10.0.1.10:53124</code>가 server <code>10.0.2.20:443</code>에 접속하면 reply destination은 53124다. Destination subnet NACL outbound와 client subnet NACL inbound가 이 reply tuple을 허용해야 한다. 무조건 1024–65535를 복사하기보다 client OS·NAT·LB의 실제 source-port 범위와 protocol을 확인해 최소 범위를 설계한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Identity와 address의 경계</h3>
+          <p>SG reference는 “그 SG를 가진 resource에서 온 traffic”을 network policy source로 표현하는 수단이지 사용자·process identity 인증이 아니다. Proxy/NAT를 지나면 observed source가 바뀔 수 있고, peering·Transit Gateway·middlebox 경로에서는 reference semantics와 원 IP 보존 조건을 공식 문서로 확인해야 한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Control-plane change의 failure window</h3>
+          <p>Rule API 성공은 desired policy가 접수되었다는 뜻이다. 기존 tracked flow, data-plane propagation, connection pool reuse 때문에 신규 connection과 기존 connection이 잠시 다르게 보일 수 있다. 변경 전후 request timestamp, source ENI, 5-tuple과 fresh connection probe가 필요하다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">경계 역할</td><td style="padding:9px;border:1px solid #dbe3e8;">SG는 workload 단위 최소 권한, NACL은 subnet-wide guardrail·긴급 deny처럼 목적을 분리한다. 같은 정책을 중복 복사하면 drift와 진단 비용이 커진다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">SG-to-SG</td><td style="padding:9px;border:1px solid #dbe3e8;">App ingress는 가능하면 LB SG를 source로 참조한다. 넓은 subnet CIDR보다 topology 변경에 강하지만 application authentication은 별도로 유지한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Rule 번호</td><td style="padding:9px;border:1px solid #dbe3e8;">NACL 번호를 100, 200처럼 간격 두고 관리한다. Emergency deny를 어디에 넣을지와 first-match 결과를 code review에서 계산한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Reply 설계</td><td style="padding:9px;border:1px solid #dbe3e8;">Forward만 보지 말고 source-port 범위, NAT/LB tuple 변화, 양쪽 NACL reverse rule을 sequence diagram으로 검증한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">IPv4/IPv6</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>0.0.0.0/0</code>과 <code>::/0</code>은 별도다. Dual-stack 도입 시 한 protocol family만 보호하거나 허용하는 drift를 점검한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">관찰 가능성</td><td style="padding:9px;border:1px solid #dbe3e8;">VPC Flow Logs의 ENI·src/dst·ports·action·timestamp를 application trace와 연결한다. Flow Logs는 payload도, application 성공도, 모든 packet의 실시간 기록도 아니다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">변경 배포</td><td style="padding:9px;border:1px solid #dbe3e8;">IaC diff → static analyzer → canary SG/subnet → fresh/established probe → metric gate → 확대 순서로 배포하고 직전 rule set을 rollback artifact로 보존한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">관리 접근</td><td style="padding:9px;border:1px solid #dbe3e8;">SSH/RDP를 internet 전체에 열지 말고 SSM·bastion·VPN·짧은 승인과 MFA를 사용한다. Break-glass rule은 TTL·owner·audit를 갖는다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> AWS SG/NACL, Linux nftables/iptables, Kubernetes NetworkPolicy, managed firewall은 state model·hook 위치·default action·rule priority가 다르다. “stateful firewall”이라는 한 단어만으로 동작을 이식하지 말고 현재 provider/engine 공식 문서와 runtime counter를 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">특정 subnet만 timeout, 신규 connection만 실패, SG 변경 뒤 기존 session만 생존, request ACCEPT 후 reply REJECT, IPv4는 성공·IPv6는 실패, conntrack allowance 감소와 동시 drop.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">정확한 timestamp·source/destination 5-tuple·ENI/subnet/AZ, 양방향 Flow Logs action, SG/NACL effective rules와 association, NACL 번호, route/NAT/LB 후 tuple, SYN/SYN-ACK/RST capture, socket state·queue, <code>conntrack_allowance_available</code>, 변경 audit.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">SG ingress/egress 누락, NACL first-match deny·reply ephemeral 누락, wrong subnet association, IPv6 rule drift, NAT/LB 뒤 source 변화, asymmetric path, stale tracked flow, conntrack exhaustion, service 미-listen·backlog 포화.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">Retry를 제한하고 한 canary source/ENI의 정확한 tuple만 임시 허용한다. Fresh connection과 기존 connection을 따로 probe하고 양방향 Flow Logs·counter 변화를 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 IaC rule·association으로 되돌리고 임시 rule을 TTL 내 제거한다. Forward/reply, IPv4/IPv6, fresh/established cohort가 baseline으로 돌아온 뒤 conntrack·latency·error budget을 관찰한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;"><code>0.0.0.0/0</code>·<code>::/0</code> 전면 허용, 모든 NACL 삭제, production 전체 동시 변경, evidence 전 conntrack flush·instance 재시작, retry 무제한 증가, ACCEPT만 보고 application 복구 선언을 하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: Linux stateless rule과 packet counter로 경계 재현</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop/Engine과 Compose, 저장소 root. 실습은 client container의 <code>NET_ADMIN</code>만 사용한다. 실행 전 “destination 8000/TCP REJECT를 넣으면 curl은 timeout일까 즉시 실패일까?”를 먼저 예측한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 baseline (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>make doctor
+make up
+make ps
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -fsS http://api:8000/headers</code></pre>
+          <p><strong>예상:</strong> DNS→TCP→HTTP가 성공한다. 실패 시 규칙을 추가하지 말고 먼저 <code>make ps</code>와 service log를 고친다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · 도구 설치와 rule 전 상태 (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client apk add --no-cache iptables
+API_IP=$(docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec -T client getent hosts api | awk 'NR==1{print $1}')
+echo "$API_IP"
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client iptables -nvL OUTPUT --line-numbers</code></pre>
+          <p><strong>예상:</strong> API IP가 출력되고 OUTPUT chain에 오늘의 REJECT rule은 없다. Package 설치가 막히면 실습을 중단하고 host/network policy를 확인한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · 실패 주입과 counter 증거 (10분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client iptables -I OUTPUT 1 -p tcp -d "$API_IP" --dport 8000 \
+  -m comment --comment day33-lab -j REJECT
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sv --max-time 4 http://api:8000/headers
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client iptables -nvL OUTPUT --line-numbers</code></pre>
+          <p><strong>예상:</strong> REJECT이므로 신규 curl이 빠르게 실패하고 rule packet counter가 증가한다. DROP이면 timeout까지 기다리므로 사용자 체감과 retry amplification이 달라진다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · 정확한 rollback과 복구 (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client iptables -D OUTPUT -p tcp -d "$API_IP" --dport 8000 \
+  -m comment --comment day33-lab -j REJECT
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -fsS http://api:8000/headers</code></pre>
+          <p><strong>예상:</strong> 추가한 정확한 rule만 사라지고 fresh connection이 다시 성공한다. Chain 전체 flush는 다른 사용자의 정책까지 제거할 수 있어 금지한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · 오류 처리와 cleanup (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code># 이전 실행 rule이 남았을 때만 exact match로 삭제한다.
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client iptables -D OUTPUT -p tcp -d "$API_IP" --dport 8000 \
+  -m comment --comment day33-lab -j REJECT 2&gt;/dev/null || true
+make down</code></pre>
+          <p><strong>자주 나는 오류:</strong> <code>Operation not permitted</code>이면 client의 <code>NET_ADMIN</code>과 container 재생성을 확인한다. <code>Bad rule</code>은 이미 rollback되었을 수 있다. <code>API_IP</code>가 비면 DNS부터 고친다. 실습 rule은 Linux host firewall 모델이며 AWS SG/NACL semantics와 동일하다고 간주하지 않는다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>SG에는 explicit deny가 없다.</strong> 차단이 필요하면 allow 제거 또는 다른 통제 계층을 설계한다.</li>
+            <li><strong>여러 SG 규칙은 합집합이다.</strong> 한 SG에서 좁혀도 다른 SG가 넓게 허용할 수 있다.</li>
+            <li><strong>NACL은 first match다.</strong> 규칙 목록에 ALLOW가 있다는 사실보다 먼저 match하는 번호가 중요하다.</li>
+            <li><strong>SG rule 삭제가 tracked flow를 즉시 끊는다고 단정하지 않는다.</strong> Fresh connection을 별도 시험한다.</li>
+            <li><strong>SG reference는 사용자 인증이 아니다.</strong> TLS identity·application authorization을 대체하지 않는다.</li>
+            <li><strong>Proxy/LB/NAT 뒤 source가 바뀔 수 있다.</strong> 실제 경계가 보는 tuple로 rule을 작성한다.</li>
+            <li><strong>Flow Logs는 지연되어 나타날 수 있고 payload를 담지 않는다.</strong> Packet capture와 application trace를 함께 쓴다.</li>
+            <li><strong>IPv4 rule은 IPv6를 제어하지 않는다.</strong> Dual-stack policy를 각각 리뷰한다.</li>
+            <li><strong>Rule 이름·tag는 enforcement가 아니다.</strong> 실제 association과 effective rule이 진실이다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“Security Group과 NACL을 비교하고 request/reply를 설명하세요.”</strong><br>좋은 답변 구조: 적용 경계 → allow/deny와 rule evaluation → state owner → forward/reply tuple → ephemeral port → failure window → 관찰 방법.</li>
+            <li><strong>“SG rule을 제거했는데 기존 SSH는 유지되고 신규 SSH만 실패합니다. 왜인가요?”</strong><br>좋은 답변 구조: tracked/untracked 가정 → connection state lifetime → fresh vs established cohort → Flow Logs·conntrack metric → 즉시 차단 요구 시 NACL 등 대안과 위험.</li>
+            <li><strong>“3-tier VPC의 최소 권한 정책과 안전한 변경 절차를 설계하세요.”</strong><br>좋은 답변 구조: LB→app→DB dependency와 수치 가정 → SG-to-SG → subnet guardrail → IPv4/IPv6 → canary·fresh probe·rollback → audit·drift 탐지.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Longest prefix match에서 <code>/24</code>와 <code>/0</code>가 모두 일치하면 무엇이 선택되는가?</li>
+            <li>Private subnet의 internet egress에 private route 외에 필요한 두 state owner는?</li>
+            <li>Flow Log ACCEPT가 HTTP 성공을 보장하지 않는 이유는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① 더 구체적인 <code>/24</code>. ② NAT mapping과 NAT public subnet의 IGW route/reply path. ③ Network 경계 통과의 증거일 뿐 TCP queue, TLS, HTTP, downstream commit을 증명하지 않기 때문이다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>SG가 inbound request를 허용했을 때 reply egress rule이 없어도 응답 가능한 이유는?</li>
+            <li>NACL에서 request 443만 허용하고 reply가 실패하는 이유와 고칠 tuple은?</li>
+            <li>Rule 변경 직후 기존 connection과 신규 connection의 결과가 다를 때 어떤 증거를 모을까?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① SG connection tracking이 허용된 flow의 응답을 stateful하게 허용한다. ② NACL은 stateless라 server outbound→client ephemeral port와 반대 subnet inbound를 명시해야 한다. ③ 두 cohort의 timestamp·5-tuple·Flow Logs·packet flags·effective rules·conntrack allowance를 비교한다. 문항당 정의 1점, 내부 흐름 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/infrastructure-security.html" style="color:#0369a1;">AWS VPC 공식 문서 · Security Group과 Network ACL 비교</a></li>
+            <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/security-group-rules.html" style="color:#0369a1;">AWS VPC 공식 문서 · Security Group rule 특성</a></li>
+            <li><a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/security-group-connection-tracking.html" style="color:#0369a1;">AWS EC2 공식 문서 · Security Group connection tracking과 allowance</a></li>
+            <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/vpc-network-acls.html" style="color:#0369a1;">AWS VPC 공식 문서 · Network ACL, rule order와 stateless 동작</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 34</strong><br>
+            <span>랩: proxy timeout·unhealthy backend·NAT 추적 — 여러 경계의 timestamp와 packet·socket·queue 증거를 한 사건으로 합칩니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
