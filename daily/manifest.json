@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-10-03T09:00:54+09:00",
+  "updatedAt": "2026-10-11T14:52:25+09:00",
   "lessons": [
     {
       "day": 1,
@@ -302,6 +302,15 @@
       "path": "day-33.html",
       "kind": "lesson",
       "publishedAt": "2026-10-03T09:00:54+09:00"
+    },
+    {
+      "day": 34,
+      "week": 5,
+      "title": "랩: proxy timeout·unhealthy backend·NAT 추적",
+      "summary": "Client↔proxy와 proxy↔backend의 두 TCP flow, timeout budget, health state convergence, published-port NAT를 timestamp·packet·socket·log로 연결하는 통합 장애 랩입니다.",
+      "path": "day-34.html",
+      "kind": "lab",
+      "publishedAt": "2026-10-11T14:52:25+09:00"
     }
   ]
 }

@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 34</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">PROXY · LB · NAT · CLOUD NETWORK · WEEK 5 / DAY 34</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">랩: proxy timeout·unhealthy backend·NAT 추적</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">두 TCP 연결과 여러 상태 소유자를 timestamp·packet·socket·log로 복원한다 · 개념 55분 + 실습 40분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Proxy 장애는 하나의 연결이 아니라 <strong>client↔proxy 연결 A</strong>와 <strong>proxy↔backend 연결 B</strong>, health-check 상태, NAT/conntrack mapping, 각 hop의 timeout이 겹친 결과다. 먼저 timeline을 만들고 어느 state owner가 종료를 선언했는지 증명한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Reverse proxy</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client 요청을 받아 대신 backend에 새 요청을 보내는 중간 server다. 두 connection의 endpoint이므로 timeout·queue·retry 상태를 소유한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Backend / target</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Proxy나 Load Balancer가 실제 처리를 맡기는 application instance다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Health check</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Target이 traffic을 받아도 되는지 별도 probe로 판단하는 control loop다. 실제 사용자 요청의 성공과 동일하지 않다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">특정 단계가 정해진 시간 안에 끝나지 않으면 기다림을 중단하는 정책이다. Connect, read, idle, request deadline은 서로 다른 clock이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Deadline</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">전체 작업이 완료돼야 하는 절대 시각 또는 남은 총 시간이다. Hop마다 새 timeout을 시작하는 것보다 end-to-end budget을 보존한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">503 / 504 / 502</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">503은 service가 처리할 target/capacity가 없음을, 504는 gateway가 upstream을 제때 받지 못했음을, 502는 gateway가 유효한 upstream response를 만들지 못했음을 보통 나타낸다. 제품별 의미를 확인한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Passive / active health</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">실제 요청 실패로 상태를 추론하는 방식과 별도 probe를 주기적으로 보내는 방식이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">NAT mapping</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Original 5-tuple과 변환된 5-tuple, reply 역변환, timeout을 연결하는 state다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Connection pool</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Proxy가 backend connection을 재사용하도록 보관하는 집합이다. 연결 비용을 줄이지만 stale state와 queue를 만든다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Backpressure</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Downstream이 느릴 때 upstream의 유입 속도·동시성·queue를 제한해 overload 전파를 막는 제어다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Failure window</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">실제 failure 발생부터 probe threshold가 unhealthy로 바뀌고 traffic이 우회될 때까지 실패가 노출되는 구간이다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>사용자는 “느리다” 또는 “502다”만 보지만, 실제 원인은 backend CPU, accept queue, proxy read timeout, LB health convergence, NAT idle expiry처럼 서로 다른 계층에 있다. 증거 없이 timeout만 늘리면 느린 실패가 더 오래 자원을 점유한다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>가용성:</strong> Health check가 green이어도 실제 endpoint·dependency가 실패할 수 있고, 모든 target이 unhealthy일 때 제품이 fail-open할 수도 있다.</li>
+            <li><strong>정확성:</strong> Client cancel 뒤 backend가 계속 작업하면 사용자는 실패를 봤지만 write는 commit되는 ambiguous success가 생긴다.</li>
+            <li><strong>성능:</strong> Timeout보다 긴 queue와 retry는 Little’s Law에 따라 in-flight state를 쌓아 장애를 증폭한다.</li>
+            <li><strong>비용:</strong> NAT·LB·cross-AZ path와 retry traffic은 같은 business request의 packet 수와 처리량 비용을 늘린다.</li>
+            <li><strong>면접:</strong> 좋은 답변은 status code를 외우지 않고 connection A/B, state transition, budget, health convergence와 안전한 rollback을 그린다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:14%;">시각</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:57%;">CLIENT → NAT/LB/PROXY → BACKEND</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:29%;">상태 소유자</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">t0</td><td style="padding:9px;border:1px solid #dbe3e8;background:#f7fafb;text-align:center;">DNS → route → client socket<br>deadline=8s, source port 선택</td><td style="padding:9px;border:1px solid #dbe3e8;">Resolver·client kernel</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">t1</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">NAT original→translated tuple<br>conntrack state 생성</td><td style="padding:9px;border:1px solid #dbe3e8;">NAT port allocator·timer</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">t2</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">Connection A: client↔proxy<br>accept queue→worker</td><td style="padding:9px;border:1px solid #dbe3e8;">Proxy listener·queue</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">t3</td><td style="padding:9px;border:1px solid #dbe3e8;background:#eef2ff;text-align:center;">Connection B: proxy↔backend<br>pool checkout 또는 new connect</td><td style="padding:9px;border:1px solid #dbe3e8;">Proxy pool·backend kernel</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">t4</td><td style="padding:9px;border:1px solid #dbe3e8;background:#edf8f2;text-align:center;">Backend queue→application→dependency<br>response 또는 지연</td><td style="padding:9px;border:1px solid #dbe3e8;">App·DB·downstream</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">t5</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fdecec;text-align:center;">Proxy read timeout=5s<br>B close→A에 502/504</td><td style="padding:9px;border:1px solid #dbe3e8;">Proxy timer·error mapper</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;text-align:center;">t6</td><td style="padding:9px;border:1px solid #dbe3e8;background:#fff7e6;text-align:center;">Health probe threshold 도달<br>healthy→unhealthy→draining</td><td style="padding:9px;border:1px solid #dbe3e8;">LB health control plane</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>Client budget:</strong> DNS·connect·TLS·server wait·body read·retry가 하나의 deadline을 나눠 쓴다.</li>
+            <li><strong>NAT:</strong> 주소만 바꾸는 것이 아니라 reply lookup과 idle timer를 소유한다. Mapping expiry는 application keep-alive보다 짧을 수 있다.</li>
+            <li><strong>Proxy termination:</strong> Connection A와 B는 독립된 sequence number, source port, buffer, timeout을 가진다. A의 원 IP가 B에 자동 보존되는 것은 아니다.</li>
+            <li><strong>Backend:</strong> TCP connect 성공은 process accept/read, thread/async queue, dependency와 commit 성공을 증명하지 않는다.</li>
+            <li><strong>Timeout:</strong> Proxy가 먼저 포기해도 backend 작업을 취소하지 못하면 late response 또는 duplicate side effect가 남는다.</li>
+            <li><strong>Health convergence:</strong> Probe interval×failure threshold만큼 traffic이 이미 나쁜 target으로 갈 수 있다. 반대로 회복도 success threshold만큼 늦다.</li>
+            <li><strong>성공 확정:</strong> Client가 complete response를 받고, side effect가 있다면 idempotency key로 단일 commit이 확인될 때 business success다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>핵심 불변식:</strong> 바깥 deadline &gt; 각 hop timeout + retry backoff여야 하며, 내부 hop은 남은 budget보다 짧아야 한다. Health probe는 실제 traffic과 같은 port·path·dependency 경계를 의도적으로 검사하고, NAT/connection pool의 idle timeout 순서를 알고 있어야 한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Timeout budget은 중첩된 clock이다</h3>
+          <p>Client deadline이 8초인데 proxy read timeout 10초, backend DB timeout 15초라면 바깥이 먼저 닫혀 내부 작업이 orphan이 된다. 권장 모델은 <code>client deadline 8s &gt; proxy total 7s &gt; backend dependency 5s</code>처럼 바깥에서 안쪽으로 감소시키고 DNS/connect/TLS/queue에 별도 budget을 예약하는 것이다. Retry는 새 8초를 받지 않고 남은 deadline만 사용한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Health state machine과 hysteresis</h3>
+          <p>Probe 하나의 실패를 즉시 unhealthy로 바꾸면 transient loss에 흔들린다. 그래서 <code>healthy → suspect → unhealthy → recovering → healthy</code>와 연속 threshold를 둔다. 이 hysteresis는 안정성을 주지만 failure detection과 recovery를 늦춘다. AWS ALB는 interval·timeout·healthy/unhealthy threshold를 각각 관리하며 모든 target이 unhealthy면 fail-open할 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Queueing과 retry amplification</h3>
+          <p>Little’s Law <code>L=λW</code>에서 초당 500 request와 평균 4초 체류는 약 2,000 in-flight를 만든다. Client가 한 번 retry하면 arrival rate가 늘고, slow backend의 queue가 더 길어져 timeout이 더 많아지는 positive feedback가 생긴다. Bounded queue, concurrency limit, jittered backoff, retry budget과 circuit breaker가 필요하다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">NAT·pool의 stale connection</h3>
+          <p>Connection pool은 socket을 살아 있다고 생각하지만 NAT/LB는 idle state를 만료했을 수 있다. 다음 write에서 RST나 timeout이 나타난다. AWS NAT gateway는 공식 문서상 idle 350초 이후 mapping을 만료하고 이후 packet에 RST를 보낼 수 있다. Pool max-idle과 keepalive를 가장 짧은 middlebox idle timeout보다 보수적으로 설정한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Error code의 owner를 구분한다</h3>
+          <p>같은 502라도 proxy connect refusal, TLS handshake, malformed response가 다르고, 504도 connect timeout·read idle timeout·NACL reply 차단이 다르다. Status code는 결과 label이지 원인 증거가 아니다. Access log의 upstream address/status/time, target reason code, Flow Logs와 packet flags를 같은 request ID·timestamp로 결합한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Timeout hierarchy</td><td style="padding:9px;border:1px solid #dbe3e8;">End-to-end SLO에서 budget을 나누고 outer &gt; inner 순서를 지킨다. Connect와 read를 분리하고 남은 deadline을 header/context로 전파한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Retry policy</td><td style="padding:9px;border:1px solid #dbe3e8;">Idempotent operation과 retryable error만 제한 횟수로 재시도한다. Exponential backoff+jitter, retry budget, idempotency key를 함께 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Health endpoint</td><td style="padding:9px;border:1px solid #dbe3e8;">Liveness는 process loop, readiness는 traffic 처리 능력을 본다. 모든 dependency를 넣어 cascading eviction을 만들지 말고 critical dependency만 목적에 맞게 선택한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Drain</td><td style="padding:9px;border:1px solid #dbe3e8;">배포·scale-in 전에 신규 request를 차단하고 in-flight가 deadline 내 끝나게 한다. Deregistration delay와 application shutdown grace를 맞춘다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Pool lifetime</td><td style="padding:9px;border:1px solid #dbe3e8;">Pool max-idle·max-life를 NAT/LB idle timeout보다 짧게 두고 stale retry는 한 번만 한다. Pool queue time을 별도 metric으로 본다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">Client total, proxy connect/queue/upstream/response time, target health reason, NAT ErrorPortAllocation·IdleTimeoutCount, socket state를 request ID와 timestamp로 연결한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Safe rollout</td><td style="padding:9px;border:1px solid #dbe3e8;">Canary target에서 timeout·health path를 바꾸고 synthetic slow/fail probe, error budget, drain을 확인한 뒤 확대한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Load shedding</td><td style="padding:9px;border:1px solid #dbe3e8;">Queue가 budget을 넘기기 전에 429/503으로 빠르게 거절하고 Retry-After를 제공한다. 느린 성공보다 bounded failure가 system을 살릴 수 있다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> ALB·NLB·Envoy·NGINX·HAProxy는 connect/read/idle timeout, passive health, fail-open, drain, retry 기본값이 다르다. 오늘 수치를 다른 제품에 복사하지 말고 배포 중인 version의 공식 문서와 runtime config dump를 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">P99와 502/504 동시 증가, 특정 AZ/target만 실패, health는 green인데 사용자 timeout, 새 connection만 실패, 350초 idle 뒤 RST, 배포 중 connection reset.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">Request ID·정확한 timestamp, client DNS/connect/TLS/TTFB/total, proxy access/error log의 upstream time·status, target health state/reason, backend queue·CPU·dependency time, SYN/RST/retransmission, socket/conntrack, NAT ErrorPortAllocation·IdleTimeoutCount·drop, 변경·배포 시각.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">Backend stop/overload, health path mismatch, threshold convergence, proxy connect/read timeout, client deadline 역전, NACL reply 차단, stale pool/NAT mapping, port exhaustion, retry storm, drain보다 긴 request, dependency partial failure.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">Retry·동시성을 제한하고 실패 target 하나를 drain한다. Healthy capacity를 확인한 뒤 canary request로 connection A/B와 direct backend를 비교하고, timeout을 늘리기 전에 어느 timer가 발화했는지 찾는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 proxy/health/timeout config와 target set으로 되돌리고 pool을 안전하게 교체한다. Fresh/keep-alive request, 정상·slow path, target reason, NAT metric이 baseline으로 돌아온 뒤 traffic을 단계 복원한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">모든 timeout 일괄 증가, 무제한 retry, health check 비활성화, 모든 target 동시 restart, conntrack flush, evidence 전 NAT/LB 재생성, health 200만 보고 business dependency 정상 선언을 하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 40분 통합 랩: timeout·backend down·source 변화 추적</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop/Engine과 Compose, 저장소 root, terminal 두 개. 이 랩의 proxy upstream timeout은 Python 코드상 5초다. 각 단계 전에 예상 status·소요 시간·source IP를 적는다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 baseline (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>make doctor
+make up
+make ps
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sS -D - http://proxy:8080/api/headers</code></pre>
+          <p><strong>예상:</strong> HTTP 200, <code>X-Lab-Upstream: api:8000</code>. JSON의 <code>client.host</code>는 원 client <code>172.28.0.50</code>가 아니라 proxy <code>172.28.0.40</code>다. Proxy가 connection을 terminate하고 B를 새로 만들었기 때문이다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · 두 TCP flow packet 관찰 (8분)</h3>
+          <p><strong>Terminal A:</strong></p>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec proxy timeout 20 tcpdump -ni eth0 \
+  'tcp port 8080 or tcp port 8000'</code></pre>
+          <p><strong>Terminal B:</strong></p>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -fsS http://proxy:8080/api/headers</code></pre>
+          <p><strong>예상:</strong> Proxy eth0에서 client→proxy:8080과 proxy→api:8000의 서로 다른 5-tuple이 보인다. Sequence number와 source port도 독립이다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · Proxy read timeout 주입 (9분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>time docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sv --max-time 8 \
+  'http://proxy:8080/api/slow?seconds=7'
+time docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -fsS --max-time 8 \
+  'http://api:8000/slow?seconds=7'
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  logs --tail=30 proxy api</code></pre>
+          <p><strong>예상:</strong> Proxy 경유는 약 5초 뒤 502 JSON으로 끝나고 direct API는 약 7초 뒤 성공한다. 같은 backend라도 proxy timer가 먼저 결과를 소유한다. API log에는 proxy가 닫은 뒤 late write 관련 흔적이 보일 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · Unhealthy backend와 복구 (9분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml stop api
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sv --max-time 4 http://proxy:8080/api/headers
+docker compose -f labs/basic-network-observability/docker-compose.yml ps
+docker compose -f labs/basic-network-observability/docker-compose.yml start api
+until docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec -T client curl -fsS http://api:8000/headers &gt;/dev/null; do sleep 1; done
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -fsS http://proxy:8080/api/headers</code></pre>
+          <p><strong>예상:</strong> Backend stop 중 proxy는 connect failure를 502로 변환하고, restart/readiness 뒤 성공한다. 이 lab proxy는 active health check가 없어서 request-time에만 실패를 발견한다. 실제 LB의 interval·threshold·drain과 구분한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · Published-port NAT 경계와 cleanup (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code># Host terminal에서 실행: 18080이 container 8080으로 변환된다.
+curl -sS -D - http://localhost:18080/api/headers
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec proxy ss -tan
+make down</code></pre>
+          <p><strong>예상:</strong> Host는 18080으로 접속하지만 proxy는 8080에서 accept한다. Docker가 published-port DNAT/control state를 소유한다. Proxy가 API에 만든 B의 source는 다시 proxy IP다. Docker Desktop/Engine에 따라 host-side source·NAT 구현은 달라질 수 있으므로 packet evidence를 진실로 삼는다.</p>
+          <p><strong>자주 나는 오류:</strong> 18080 충돌이면 <code>docker compose ps</code>로 owner를 확인하고 임의 process를 종료하지 않는다. Direct slow call이 8초를 넘으면 machine 부하를 확인한다. Stop 뒤 502가 아닌 DNS error여도 backend discovery failure라는 증거다. Cleanup 전에 API를 start해 다른 실습자의 상태를 복구한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>502/504는 원인이 아니라 proxy가 본 결과다.</strong> Upstream timing과 packet evidence를 본다.</li>
+            <li><strong>Health check 성공은 business dependency 성공이 아니다.</strong> 너무 얕아도, 너무 깊어도 문제다.</li>
+            <li><strong>모든 target unhealthy가 traffic 0을 뜻하지 않을 수 있다.</strong> ALB의 fail-open 동작을 설계에 포함한다.</li>
+            <li><strong>Timeout을 늘리면 capacity가 늘지 않는다.</strong> In-flight·queue·memory가 더 쌓일 수 있다.</li>
+            <li><strong>Client timeout은 backend cancel을 보장하지 않는다.</strong> Deadline propagation과 cancellation support가 필요하다.</li>
+            <li><strong>Retry는 새로운 traffic이다.</strong> 멱등성·budget·backoff가 없으면 outage를 증폭한다.</li>
+            <li><strong>Proxy 뒤 source IP는 원 client가 아닐 수 있다.</strong> Trusted proxy에서만 전달 header를 수용한다.</li>
+            <li><strong>NAT idle timeout과 pool lifetime을 독립 설정하면 stale socket이 생긴다.</strong></li>
+            <li><strong>Average latency만 보면 tail queue를 놓친다.</strong> P95/P99와 timeout/error cohort를 나눈다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“Client가 8초에 timeout하고 proxy는 504, backend는 10초 뒤 성공 로그를 남겼습니다. 설명하세요.”</strong><br>좋은 답변 구조: connection A/B → 각 timer owner → cancellation 부재 → ambiguous side effect → idempotency/deadline propagation → metric·trace 증거.</li>
+            <li><strong>“Health check interval과 threshold를 설계하세요.”</strong><br>좋은 답변 구조: RTO·false positive 요구 → detection time 계산 → probe cost/path → hysteresis·fail-open → drain/recovery → canary와 alarm.</li>
+            <li><strong>“배포 뒤 간헐 502와 NAT IdleTimeoutCount가 증가합니다. 어떻게 진단합니까?”</strong><br>좋은 답변 구조: timestamp cohort → fresh vs pooled connection → NAT/LB/pool idle order → RST·retransmission → retry amplification → pool max-idle rollback과 장기 대안.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Security Group과 NACL의 state·rule evaluation 차이는?</li>
+            <li>NACL에서 request 443만 허용하면 reply가 실패할 수 있는 이유는?</li>
+            <li>SG rule 삭제 뒤 기존 connection과 신규 connection이 다를 수 있는 이유는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① SG는 ENI 경계 stateful allow 합집합, NACL은 subnet 경계 stateless first-match allow/deny다. ② Reply destination ephemeral port를 별도 허용해야 한다. ③ Tracked state lifetime 때문에 기존 flow가 계속 허용될 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Proxy 경유 request에서 TCP connection이 최소 두 개인 이유는?</li>
+            <li>Health check threshold의 장점과 failure window 비용은?</li>
+            <li>NAT idle timeout보다 pool max-idle이 길면 어떤 failure가 생기는가?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Proxy가 client connection을 terminate하고 backend에 새 5-tuple로 연결하기 때문이다. ② Transient failure 흔들림을 줄이지만 감지·복구가 늦어 그동안 bad target에 traffic이 갈 수 있다. ③ Pool은 살아 있다고 믿는 mapping-expired socket을 재사용해 RST/timeout을 낸다. 문항당 정의 1점, 내부 흐름 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html" style="color:#0369a1;">AWS ELB 공식 문서 · ALB health check, threshold와 fail-open</a></li>
+            <li><a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-troubleshooting.html" style="color:#0369a1;">AWS ELB 공식 문서 · ALB 502/503/504 원인과 진단</a></li>
+            <li><a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-health-check-logs.html" style="color:#0369a1;">AWS ELB 공식 문서 · Health check log와 failure reason</a></li>
+            <li><a href="https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-troubleshooting.html" style="color:#0369a1;">AWS VPC 공식 문서 · NAT idle timeout·RST·connection failure</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 35</strong><br>
+            <span>회상: source IP가 바뀌는 지점 표시 — Week 5 전체 packet path를 빈 화면에서 복원하고 장애 증거로 방어합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
