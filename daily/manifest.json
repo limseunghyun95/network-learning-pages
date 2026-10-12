@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-10-11T14:52:25+09:00",
+  "updatedAt": "2026-10-12T09:18:23+09:00",
   "lessons": [
     {
       "day": 1,
@@ -311,6 +311,15 @@
       "path": "day-34.html",
       "kind": "lab",
       "publishedAt": "2026-10-11T14:52:25+09:00"
+    },
+    {
+      "day": 35,
+      "week": 5,
+      "title": "회상: source IP가 바뀌는 지점 표시",
+      "summary": "NAT·L4/L7 LB·proxy를 지나는 hop별 5-tuple과 peer address, forwarded identity, trust boundary를 복원하고 source IP 기반 보안·진단의 함정을 리뷰합니다.",
+      "path": "day-35.html",
+      "kind": "review",
+      "publishedAt": "2026-10-12T09:18:23+09:00"
     }
   ]
 }
