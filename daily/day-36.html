@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 36</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">RELIABILITY ENGINEERING · WEEK 6 / DAY 36</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">connect/read/write/request timeout</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">하나의 “timeout”을 단계별 clock·상태 소유자·failure window로 분해한다 · 이론 55분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Timeout은 서버가 실패했다는 판결이 아니라 기다리던 쪽의 local clock이 끝났다는 사건이다. DNS→connect→TLS→write→queue→response header→body의 각 구간에 서로 다른 제한을 두고, 전체 deadline으로 합을 제한해야 한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">어떤 작업이 정해진 시간 안에 관찰 가능한 진전을 만들지 못하면 기다리기를 중단하는 local policy다. Remote 실패 자체를 증명하지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Connect timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">새 connection을 사용할 수 있을 때까지의 제한이다. 제품에 따라 DNS, TCP 3-way handshake, TLS/QUIC handshake 포함 범위가 다르다. curl은 이 구간에 DNS와 TCP·TLS·QUIC handshake를 포함한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">DNS timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">이름을 IP address로 바꾸는 resolver 질의의 제한이다. Connect API 바깥에서 수행되면 별도 budget이 필요하다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">TLS handshake timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Certificate 검증과 key 합의가 끝나 encrypted channel이 준비될 때까지의 제한이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Write timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Request byte를 socket에 보내는 작업이 진전하지 못하는 시간의 제한이다. Small write가 kernel send buffer에 들어간 것과 remote application이 읽은 것은 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Read / response-header timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Response byte 또는 첫 header를 기다리는 제한이다. Per-read, byte 사이 inactivity, header-only, total body 중 무엇인지는 library마다 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Idle timeout</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Connection에서 아무 byte도 오가지 않는 연속 시간을 제한한다. Long streaming transfer의 전체 시간 제한과 다르다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Request timeout / deadline</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">DNS부터 body 완료까지 전체 request와 retry가 쓸 수 있는 최대 시간이다. Deadline은 절대 종료 시각, timeout은 지금부터의 duration으로 표현하는 경우가 많다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">TTFB</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Time To First Byte. Request 시작부터 response 첫 byte까지다. Connect·queue·server compute가 섞여 있으므로 phase timing과 함께 본다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Blocking / nonblocking socket</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Blocking call은 준비될 때까지 thread를 재우고, nonblocking call은 즉시 돌아와 event loop가 readiness와 timer를 함께 감시한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Monotonic clock</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">System wall-clock 보정에도 뒤로 가지 않는 duration 측정용 clock이다. Wall clock은 여러 system의 timestamp 상관관계에 사용한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Ambiguous completion</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Client는 timeout됐지만 server가 이미 mutation을 commit했는지 알 수 없는 상태다. Retry 전에 idempotency가 필요하다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>“Timeout 3초” 하나만 두면 2.9초를 DNS/connect에 쓰고 남은 0.1초에 server 처리를 요구하거나, 반대로 downstream은 이미 포기했는데 upstream이 계속 CPU와 DB connection을 소비한다. Latency SLO와 자원 보호를 동시에 달성하려면 단계별 timeout과 end-to-end deadline을 분리해야 한다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>가용성:</strong> 무한 대기는 thread·socket·connection pool을 고갈시켜 작은 장애를 cascading failure로 키운다.</li>
+            <li><strong>정확성:</strong> Timeout 뒤 POST를 무조건 재시도하면 결제·주문이 중복될 수 있다.</li>
+            <li><strong>운영:</strong> HTTP 408은 server가 request 전체를 제시간에 받지 못한 경우이고, 504는 gateway가 upstream에서 적시 response를 못 받은 경우다. 둘 다 원인을 특정하는 packet 증거는 아니다.</li>
+            <li><strong>비용:</strong> 너무 짧으면 정상 tail latency를 실패로 바꾸고 retry load를 만든다. 너무 길면 queue와 memory가 오래 점유된다.</li>
+            <li><strong>면접:</strong> 좋은 답변은 timeout 숫자보다 clock 시작/종료, owner, cancellation, retry 안전성, 관측 지표를 말한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:13%;">시각</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:45%;">Data path와 clock</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:21%;">상태 소유자</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:21%;">핵심 증거</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">t0</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eaf7fc;">Client request 시작<br><strong>전체 deadline ON</strong></td><td style="padding:8px;border:1px solid #dbe3e8;">Caller context</td><td style="padding:8px;border:1px solid #dbe3e8;">request ID, start</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">↓ t1</td><td style="padding:8px;border:1px solid #dbe3e8;background:#f7fafb;">DNS query·cache lookup<br>DNS/connect budget</td><td style="padding:8px;border:1px solid #dbe3e8;">Resolver</td><td style="padding:8px;border:1px solid #dbe3e8;">lookup duration, answer</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">↓ t2</td><td style="padding:8px;border:1px solid #dbe3e8;background:#fff7e6;">TCP SYN → retransmission → ESTABLISHED<br>Connect timeout</td><td style="padding:8px;border:1px solid #dbe3e8;">Client kernel</td><td style="padding:8px;border:1px solid #dbe3e8;">SYN/SYN-ACK, errno</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">↓ t3</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eef2ff;">TLS ClientHello ↔ ServerHello<br>Handshake timeout</td><td style="padding:8px;border:1px solid #dbe3e8;">TLS library</td><td style="padding:8px;border:1px solid #dbe3e8;">TLS event, cert error</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">↓ t4</td><td style="padding:8px;border:1px solid #dbe3e8;background:#edf8f2;">Request header/body → send buffer<br>Write no-progress timeout</td><td style="padding:8px;border:1px solid #dbe3e8;">Client socket</td><td style="padding:8px;border:1px solid #dbe3e8;">bytes written, send-q</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">↓ t5</td><td style="padding:8px;border:1px solid #dbe3e8;background:#fceff3;">Proxy accept → queue/pool 대기<br>Queue/acquire timeout</td><td style="padding:8px;border:1px solid #dbe3e8;">Proxy/LB</td><td style="padding:8px;border:1px solid #dbe3e8;">queue depth, pool wait</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">↓ t6</td><td style="padding:8px;border:1px solid #dbe3e8;background:#fff7e6;">Proxy → backend 새 connection<br>Upstream connect timeout</td><td style="padding:8px;border:1px solid #dbe3e8;">Proxy socket</td><td style="padding:8px;border:1px solid #dbe3e8;">target, connect time</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">↓ t7</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eaf7fc;">Backend 처리 → response header<br>Response-header timeout / TTFB</td><td style="padding:8px;border:1px solid #dbe3e8;">Backend·proxy</td><td style="padding:8px;border:1px solid #dbe3e8;">span, first-byte</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">↓ t8</td><td style="padding:8px;border:1px solid #dbe3e8;background:#edf8f2;">Body chunk → chunk → 완료<br>Read inactivity / total timeout</td><td style="padding:8px;border:1px solid #dbe3e8;">Receiver</td><td style="padding:8px;border:1px solid #dbe3e8;">bytes, last progress</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>t0:</strong> Caller가 전체 deadline을 만든다. 이후 hop은 남은 budget보다 긴 local timeout을 잡지 않는다.</li>
+            <li><strong>t1:</strong> DNS가 client library 바깥에서 일어나면 connect timeout에 포함되지 않을 수 있다. Phase별 timing으로 확인한다.</li>
+            <li><strong>t2:</strong> Packet drop이면 kernel이 SYN을 재전송하고, reject이면 즉시 RST/ICMP로 실패할 수 있다. “접속 실패”라도 duration이 다르다.</li>
+            <li><strong>t3:</strong> TCP 연결 성공 후에도 TLS handshake는 certificate·CPU·packet loss 때문에 별도 실패할 수 있다.</li>
+            <li><strong>t4:</strong> <code>write()</code> 성공은 byte가 local send buffer에 복사됐다는 뜻일 수 있다. Remote application 처리 완료가 아니다.</li>
+            <li><strong>t5–t6:</strong> Proxy가 pool/queue에서 기다린 시간과 upstream connect 시간을 분리한다. Queueing을 connect latency로 오인하지 않는다.</li>
+            <li><strong>t7–t8:</strong> Header가 빨리 와도 body stream이 멈출 수 있다. Header timeout, inactivity timeout, total deadline을 서로 대체하지 않는다.</li>
+            <li><strong>Timeout 시점:</strong> 기다리던 쪽은 socket을 닫거나 cancellation을 보낼 수 있지만 remote가 이미 commit했을 수 있다. 결과는 ambiguous하다.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Readiness와 timer race</h3>
+          <p>Nonblocking client는 socket을 event loop에 등록하고 “readable/writable” readiness와 timer 만료 중 먼저 온 event를 처리한다. 같은 tick에 둘 다 도착할 수 있으므로 state transition은 한 번만 완료되어야 한다. Timer callback이 이미 성공한 request를 다시 cancel하지 않도록 generation ID나 atomic state가 필요하다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Kernel buffer와 backpressure</h3>
+          <p>Application의 write는 user buffer → kernel send buffer → NIC queue → network → peer receive buffer → peer application 순으로 진행한다. Peer가 읽지 않으면 advertised receive window가 줄고, local send queue가 차면 write가 block 또는 <code>EAGAIN</code>이 된다. 그래서 write timeout은 “server compute가 느림”이 아니라 data path의 소비가 멈춘 증거다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Retransmission과 connect budget</h3>
+          <p>TCP SYN 또는 data loss는 kernel retransmission timer와 exponential backoff를 거친다. Application connect timeout이 더 짧으면 kernel이 포기하기 전에 socket을 닫는다. RST처럼 즉시 증거가 오면 timeout이 아니라 connection refused다. Packet capture와 errno를 함께 봐야 한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Timer 자료구조와 clock</h3>
+          <p>수많은 request timer는 보통 heap 또는 timing wheel로 관리된다. Duration은 NTP 조정으로 뒤로 갈 수 없는 monotonic clock으로 계산한다. 서로 다른 host의 trace를 정렬할 때는 wall clock과 clock skew를 따로 기록한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">HTTP/2 multiplexing의 함정</h3>
+          <p>HTTP/2는 한 TCP connection에 여러 stream을 싣는다. 한 stream의 request deadline이 끝나면 해당 stream을 reset해야지 공유 connection 전체를 무조건 닫으면 다른 정상 request까지 실패한다. 반대로 TCP packet loss는 같은 connection의 여러 stream에 영향을 줄 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Queue와 Little’s Law</h3>
+          <p>평균 동시 처리량 L은 도착률 λ와 평균 체류시간 W의 곱(<code>L = λW</code>)이다. Timeout을 길게 하면 W가 늘어 queue·memory·connection 점유도 늘 수 있다. 따라서 timeout 조정은 capacity와 admission control 없이 단독으로 하지 않는다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">SLO에서 시작</td><td style="padding:9px;border:1px solid #dbe3e8;">정상 phase histogram의 p95/p99, 허용 false-timeout 비율, 사용자 latency SLO로 budget을 정한다. 평균만 보지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Outer &gt; inner</td><td style="padding:9px;border:1px solid #dbe3e8;">Backend local timeout &lt; proxy upstream timeout &lt; caller deadline이 되도록 response 전파·cleanup 여유를 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Phase 분리</td><td style="padding:9px;border:1px solid #dbe3e8;">DNS, connect, TLS, write, pool acquire, response header, read inactivity를 각각 측정한다. 하나의 request timeout은 최종 상한으로 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">남은 budget 전파</td><td style="padding:9px;border:1px solid #dbe3e8;">절대 deadline 또는 검증된 remaining budget을 downstream에 전달한다. Network delay와 clock skew를 고려해 reserve를 남긴다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">0/무한 금지</td><td style="padding:9px;border:1px solid #dbe3e8;">Library의 0이 “즉시 timeout”인지 “제한 없음”인지 공식 문서로 확인한다. 모든 external call과 pool wait에 유한 상한을 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Cancellation 연결</td><td style="padding:9px;border:1px solid #dbe3e8;">Client 포기 시 proxy, application, DB query까지 취소를 전파한다. 단, commit boundary 이후 보상·조회 경로를 준비한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Ambiguity 처리</td><td style="padding:9px;border:1px solid #dbe3e8;">Mutation에는 idempotency key와 결과 조회 API를 둔다. Timeout만 보고 blind retry하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">관측 가능성</td><td style="padding:9px;border:1px solid #dbe3e8;">Phase duration, timeout owner/reason, bytes sent/received, selected IP/target, queue/pool wait, remaining budget을 trace span에 기록한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 배포</td><td style="padding:9px;border:1px solid #dbe3e8;">Config를 canary에 적용해 timeout rate·tail latency·retry volume·resource use를 비교하고 즉시 되돌릴 수 있게 한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> curl의 <code>--connect-timeout</code>은 DNS와 protocol handshake까지 포함하지만, Go <code>net.Dialer.Timeout</code>, <code>http.Transport.ResponseHeaderTimeout</code>, <code>http.Client.Timeout</code>, server의 read/write/idle timeout은 서로 다른 범위다. 이름만 보고 같다고 가정하지 말고 사용 중인 version의 공식 문서를 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">Connect timeout 증가, proxy 504, client total timeout, body 중간 끊김, write가 멈춤, timeout 후에도 backend CPU/DB 사용 지속, 재시도 뒤 중복 mutation.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">Request/trace ID와 monotonic phase duration, DNS answer, SYN/SYN-ACK/RST와 retransmission, TLS event, bytes sent/received, socket state와 send/recv queue, proxy queue/pool wait, upstream target, backend span·commit timestamp, timeout owner·configured value·remaining budget.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">DNS 지연, route/SG/NACL drop, backlog 포화, TLS handshake 병목, peer가 body를 읽지 않음, connection pool 고갈, backend queue/lock/GC, timeout 계층 역전, idle timeout 불일치, cancellation 미전파.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">한 request를 고정 ID로 재현해 phase timing과 packet/socket/log를 상관시킨다. 과부하면 admission control·load shedding으로 새 작업을 줄이고, read-only 요청만 제한적으로 우회한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 timeout·pool·queue config로 rollback하고 새 connection에서 검증한다. Ambiguous mutation은 idempotency key/조회 API로 결과를 확인하고 중복을 보상한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">모든 timeout을 일괄 확대, 근거 없는 무제한 retry, timeout 난 POST 즉시 재전송, 증거 전 pod/LB/NAT 전체 재시작, queue 무제한 확대, 504를 backend fault로 단정, timeout을 성공/실패 확정 신호로 취급하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: connect와 total/read timeout을 증거로 분리</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop/Engine과 Compose, 저장소 root. 명령 실행 전에 “즉시 refused인가, 약 2초 뒤 timeout인가, proxy가 약 5초 뒤 끊는가”를 먼저 적는다. Lab container의 temporary firewall rule은 cleanup에서 정확히 제거한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 baseline timing (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>make doctor
+make up
+make ps
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sS -o /dev/null \
+  -w 'code=%{http_code} dns=%{time_namelookup} connect=%{time_connect} start=%{time_starttransfer} total=%{time_total}\n' \
+  http://api:8000/headers</code></pre>
+          <p><strong>예상:</strong> HTTP 200이며 <code>connect ≤ start ≤ total</code>이다. Docker service name은 local DNS에서 빠르게 해석되지만 수치는 환경마다 다르다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · Reject와 timeout 구분 (10분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code># 닫힌 port: 보통 RST로 즉시 connection refused
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl --connect-timeout 2 --max-time 4 -v \
+  http://api:9999/
+
+# API IP로 향하는 SYN을 DROP해 connect timeout 재현
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client apk add --no-cache iptables
+API_IP=$(docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec -T client getent hosts api | awk 'NR==1{print $1}')
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client iptables -I OUTPUT 1 -p tcp -d "$API_IP" --dport 8000 -j DROP
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl --connect-timeout 2 --max-time 4 -v \
+  http://api:8000/headers</code></pre>
+          <p><strong>예상:</strong> 첫 명령은 대개 즉시 refused, 두 번째는 SYN reply가 없어 약 2초 뒤 connect timeout이다. 즉시 <code>Network unreachable</code>이 나오면 route 자체가 없어 DROP 실험과 다른 failure다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · Client total timeout (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code># 먼저 DROP rule 제거
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client iptables -D OUTPUT -p tcp -d "$API_IP" --dport 8000 -j DROP
+
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl --max-time 3 -v \
+  'http://api:8000/slow?seconds=5'</code></pre>
+          <p><strong>예상:</strong> Connection은 빠르게 성공하지만 response header 전에 client의 전체 3초 budget이 끝난다. Client가 닫아도 backend가 이미 시작한 5초 작업은 cancellation 구현이 없으면 계속될 수 있다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · Proxy upstream timeout (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl --max-time 8 -sS -D - \
+  -o /dev/null -w 'total=%{time_total}\n' \
+  'http://proxy:8080/api/slow?seconds=7'</code></pre>
+          <p><strong>예상:</strong> Lab proxy의 upstream 제한 약 5초가 client의 8초보다 먼저 만료되어 502가 온다. 실무 gateway는 같은 계열의 사건을 504로 표현할 수 있으므로 status와 owner를 함께 기록한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · Cleanup (5분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code># Rule이 남았는지 확인하고 남았을 때만 같은 식으로 삭제
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client iptables -S OUTPUT
+make down</code></pre>
+          <p><strong>자주 나는 오류와 해결:</strong> Docker가 꺼져 있으면 <code>make doctor</code>에서 멈추고 daemon을 시작한다. <code>Operation not permitted</code>이면 container의 NET_ADMIN capability를 확인한다. <code>API_IP</code>가 비면 <code>make up</code>과 service DNS를 확인한다. 실패 중간에도 DROP rule을 먼저 제거한 뒤 <code>make down</code>한다. Small request로 write timeout이 재현되지 않는 것은 정상이다. Kernel send buffer가 먼저 받아 줄 수 있으므로 큰 body·느린 receiver·send queue 관측이 필요하다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Timeout은 remote failure 확정이 아니다.</strong> 기다린 쪽의 policy 만료다.</li>
+            <li><strong>Connect timeout의 범위는 보편적이지 않다.</strong> DNS·TLS 포함 여부를 client 공식 문서로 확인한다.</li>
+            <li><strong>Read timeout이라는 이름도 모호하다.</strong> Header, per-read, inactivity, total body 중 무엇인지 확인한다.</li>
+            <li><strong>Write 성공은 처리 성공이 아니다.</strong> Byte가 local kernel buffer에만 있을 수 있다.</li>
+            <li><strong>Idle timeout은 total deadline이 아니다.</strong> Byte가 조금씩 오면 무한히 이어질 수 있다.</li>
+            <li><strong>Outer timeout이 inner보다 짧으면</strong> downstream이 완료해도 caller는 이미 포기하고 자원만 낭비한다.</li>
+            <li><strong>Pool acquire와 queue 대기를 숨기지 않는다.</strong> Network connect와 별도 phase다.</li>
+            <li><strong>Wall clock으로 duration을 재지 않는다.</strong> Monotonic clock을 쓰고 wall clock은 상관분석에 쓴다.</li>
+            <li><strong>HTTP/2 한 stream timeout으로 공유 connection을 무조건 닫지 않는다.</strong></li>
+            <li><strong>Timeout 확대만으로 과부하를 고치지 않는다.</strong> Queue와 동시성 점유가 더 커질 수 있다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“Connect, write, read, request timeout의 차이와 값 설정 기준을 설명하세요.”</strong><br>좋은 답변 구조: 용어 범위 확인 → DNS/TCP/TLS/write/queue/header/body timeline → SLO percentile·false-timeout 가정 → outer/inner budget → phase metric과 canary.</li>
+            <li><strong>“Client timeout 뒤 결제 요청을 재시도해도 됩니까?”</strong><br>좋은 답변 구조: Timeout의 local 의미 → request byte/commit/response failure window → idempotency key와 결과 조회 → retry eligibility → 보상·audit.</li>
+            <li><strong>“504가 급증했지만 backend CPU는 정상입니다. 어떻게 진단합니까?”</strong><br>좋은 답변 구조: 504 owner 확인 → proxy queue/pool/upstream target → connect/TTFB/body phase → packet/socket/trace correlation → 안전한 load shedding → rollback과 대안.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>L7 proxy 뒤 backend의 socket peer가 original client가 아닌 이유는?</li>
+            <li>X-Forwarded-For를 신뢰하려면 어떤 경계 정책이 필요한가?</li>
+            <li>NAT와 proxy를 지나는 요청을 연결하는 데 source IP보다 적합한 것은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Proxy가 client connection을 terminate하고 backend로 새 connection을 만든다. ② Public 입력 제거/정규화, trusted proxy 목록·hop 수, append 정책이 필요하다. ③ End-to-end request/trace ID와 hop별 timestamp·tuple이다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Connect timeout과 request timeout을 둘 다 두는 이유는?</li>
+            <li>Small request의 <code>write()</code> 성공이 remote 처리 성공을 뜻하지 않는 이유는?</li>
+            <li>Timeout 뒤 mutation 결과가 ambiguous한 이유와 안전한 대안은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Connect 단계의 빠른 실패와 모든 phase·retry의 전체 상한을 각각 보장하기 위해서다. ② Local send buffer 복사만 끝났고 network·peer read·commit은 남아 있기 때문이다. ③ Response를 못 받았어도 server가 commit했을 수 있으므로 idempotency key와 결과 조회·보상이 필요하다. 문항당 정의 1점, 내부 흐름 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9110.html" style="color:#0369a1;">IETF RFC 9110 · HTTP 408 Request Timeout과 504 Gateway Timeout 의미</a></li>
+            <li><a href="https://curl.se/docs/manpage.html" style="color:#0369a1;">curl 공식 manual · --connect-timeout과 --max-time 범위</a></li>
+            <li><a href="https://pkg.go.dev/net/http" style="color:#0369a1;">Go net/http 공식 문서 · Client·Transport·Server timeout 경계</a></li>
+            <li><a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-troubleshooting.html" style="color:#0369a1;">AWS ALB 공식 문서 · 504 가능한 원인과 timeout 경계</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 37</strong><br>
+            <span>deadline propagation과 cancellation — 남은 시간을 hop마다 전달하고 이미 포기한 작업의 자원 소비를 멈춥니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

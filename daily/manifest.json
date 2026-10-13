@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-10-12T09:18:23+09:00",
+  "updatedAt": "2026-10-13T09:00:33+09:00",
   "lessons": [
     {
       "day": 1,
@@ -320,6 +320,15 @@
       "path": "day-35.html",
       "kind": "review",
       "publishedAt": "2026-10-12T09:18:23+09:00"
+    },
+    {
+      "day": 36,
+      "week": 6,
+      "title": "connect/read/write/request timeout",
+      "summary": "DNS·TCP·TLS·write·queue·response header·body 구간의 timeout clock과 상태 소유자를 분해하고 전체 deadline, ambiguous completion, 안전한 장애 대응을 학습합니다.",
+      "path": "day-36.html",
+      "kind": "lesson",
+      "publishedAt": "2026-10-13T09:00:33+09:00"
     }
   ]
 }
