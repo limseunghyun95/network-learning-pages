@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 37</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">RESILIENCE PATTERN · WEEK 6 / DAY 37</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">deadline propagation과 cancellation</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">남은 시간과 “더는 결과가 필요 없다”는 신호를 request tree 전체로 전달한다 · 이론 55분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Deadline은 전체 요청이 쓸 수 있는 단 하나의 시간 예산이고, cancellation은 그 결과를 더 이상 기다리지 않는다는 제어 신호다. 각 hop은 이미 소비한 시간을 빼고 더 짧은 child budget을 만들며, 취소를 socket·worker·DB까지 협력적으로 전파해야 한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Deadline</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">이 시각 이후에는 caller가 결과를 기다리지 않겠다는 절대 종료점이다. Timeout duration을 request 시작 시각에 더해 만들 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Remaining budget</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">현재 시점부터 deadline까지 남은 시간이다. <code>remaining = deadline − now − reserve</code>로 계산하며 0 이하면 새 downstream 호출을 시작하지 않는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Propagation</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Deadline·trace 같은 request-scoped context를 function, thread, process, service 경계를 넘어 다음 작업에 전달하는 과정이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Cancellation</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Caller가 더는 결과를 원하지 않음을 알리는 제어 신호다. Deadline 만료, 사용자 중단, parent 실패, I/O 오류로 시작될 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Cooperative cancellation</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Runtime이 worker를 강제로 죽이는 대신 작업 코드가 취소 신호를 확인하고 안전한 지점에서 종료·정리하는 방식이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Cancellation point</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Loop 반복, queue 대기, outbound RPC, DB query처럼 취소 신호를 확인하고 빠져나올 수 있는 지점이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Parent / child context</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Parent request에서 파생된 작업 관계다. Parent 취소는 모든 child에 퍼지고, child deadline은 parent보다 길어지면 안 된다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Fan-out</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">한 request가 여러 downstream을 병렬 호출하는 구조다. 가장 느린 sibling, quorum 조건, 부분 실패와 취소 범위를 정해야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Reserve / guard band</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Downstream 결과를 serialize하고 client로 돌려보낼 시간을 남겨 두는 여유 예산이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Commit point</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">DB transaction이나 외부 결제가 되돌리기 어려운 상태로 확정되는 경계다. 취소가 도착한 시점과 commit 전후를 구분해야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Orphan work</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Caller는 포기했지만 server·worker·DB가 계속 수행하는 무주인 작업이다. CPU·lock·connection을 낭비해 overload를 키운다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Cancellation cause</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">사용자 취소, deadline 초과, parent 실패처럼 왜 취소됐는지를 나타내는 이유다. 단순 “cancelled”보다 진단과 retry 판단에 유용하다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>Frontend가 2초 뒤 포기하는데 backend가 30초 timeout으로 DB query를 계속하면 사용자는 실패를 보지만 system은 성공 가능성이 없는 일에 자원을 쓴다. Traffic이 몰리면 orphan work가 새 request를 막고, timeout과 retry가 더 늘어나는 positive feedback loop가 된다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Latency SLO:</strong> Hop마다 새 timeout을 시작하지 않고 처음 받은 end-to-end budget 안에서 끝낸다.</li>
+            <li><strong>자원 회수:</strong> Socket만 닫지 말고 queue entry, goroutine/thread, DB query, downstream RPC를 함께 취소한다.</li>
+            <li><strong>정확성:</strong> Commit 이후 취소는 rollback 명령이 아니다. 결과 저장·조회·idempotency 전략이 필요하다.</li>
+            <li><strong>보안:</strong> 외부 client가 보낸 지나치게 짧거나 긴 deadline metadata를 그대로 믿으면 resource exhaustion이나 실패 유도가 가능하다.</li>
+            <li><strong>면접:</strong> “Context를 전달한다”를 넘어 clock skew, reserve, fan-out, cancellation race, commit boundary까지 설명해야 실무 수준이다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:12%;">시각</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:46%;">Data path / remaining budget</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:21%;">상태 소유자</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:21%;">Control path</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">t0</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eaf7fc;">Client → Edge<br>전체 deadline 2,000ms</td><td style="padding:8px;border:1px solid #dbe3e8;">Client context·timer</td><td style="padding:8px;border:1px solid #dbe3e8;">Cancel root 생성</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">+100</td><td style="padding:8px;border:1px solid #dbe3e8;background:#f7fafb;">Edge → Service A<br>1,900ms − 100ms reserve</td><td style="padding:8px;border:1px solid #dbe3e8;">Ingress policy</td><td style="padding:8px;border:1px solid #dbe3e8;">외부 값 clamp·재생성</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">+500</td><td style="padding:8px;border:1px solid #dbe3e8;background:#fff7e6;">A fan-out → B, C<br>각 child 최대 1,300ms</td><td style="padding:8px;border:1px solid #dbe3e8;">A parent context</td><td style="padding:8px;border:1px solid #dbe3e8;">Sibling cancel tree</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">+800</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eef2ff;">B → DB query<br>남은 budget 1,000ms</td><td style="padding:8px;border:1px solid #dbe3e8;">B·DB driver</td><td style="padding:8px;border:1px solid #dbe3e8;">Query cancel handle</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">+1,100</td><td style="padding:8px;border:1px solid #dbe3e8;background:#edf8f2;">C 성공 → A<br>Partial result 보관</td><td style="padding:8px;border:1px solid #dbe3e8;">A join state</td><td style="padding:8px;border:1px solid #dbe3e8;">Quorum 판단</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">+1,500</td><td style="padding:8px;border:1px solid #dbe3e8;background:#fceff3;">사용자 화면 이동<br>Client가 root cancel</td><td style="padding:8px;border:1px solid #dbe3e8;">Client</td><td style="padding:8px;border:1px solid #dbe3e8;">RST/stream cancel/RPC cancel</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">↓</td><td style="padding:8px;border:1px solid #dbe3e8;background:#fff7e6;">Edge → A → B → DB<br>새 data work 시작 금지</td><td style="padding:8px;border:1px solid #dbe3e8;">각 handler</td><td style="padding:8px;border:1px solid #dbe3e8;">Cancel 전파·cleanup</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">t2</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eaf7fc;">모든 child 종료 또는 commit 결과 기록</td><td style="padding:8px;border:1px solid #dbe3e8;">Operation owner</td><td style="padding:8px;border:1px solid #dbe3e8;">Cause·duration 기록</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>Client:</strong> Root deadline과 cancel 권한을 만든다. Deadline 만료 전이라도 사용자가 화면을 떠나면 cancel할 수 있다.</li>
+            <li><strong>Ingress:</strong> 외부 deadline을 신뢰하지 않고 service 최소·최대 범위로 clamp한다. Trace ID와 deadline은 목적이 다른 context다.</li>
+            <li><strong>Service A:</strong> 이미 쓴 500ms와 response reserve를 빼고 B·C child budget을 만든다. Child가 parent보다 길어지지 않는 것이 불변식이다.</li>
+            <li><strong>Fan-out:</strong> “모두 필요”, “하나만 필요”, quorum 중 성공 조건을 먼저 정한다. 조건을 만족하면 불필요한 sibling을 취소한다.</li>
+            <li><strong>DB:</strong> Driver가 context-aware query cancellation을 지원해야 한다. Handler가 return해도 DB query가 자동 종료된다고 가정하지 않는다.</li>
+            <li><strong>Cancel:</strong> Data response와 별도의 control path로 전파된다. Transport signal 도착은 application worker가 실제로 멈췄다는 확인이 아니다.</li>
+            <li><strong>성공 확정:</strong> Commit 전에는 취소·rollback할 수 있지만 commit 뒤에는 결과 상태를 durable store에 남겨 조회 가능하게 해야 한다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>핵심 불변식:</strong> <code>child deadline ≤ parent deadline − response reserve</code>. 각 hop은 deadline을 연장하지 않고, cancel 수신 뒤 새 side effect를 시작하지 않으며, 종료 시 timer·queue slot·socket·DB handle을 정확히 한 번 해제한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">절대 시각보다 남은 duration</h3>
+          <p>Host A의 09:00:02와 Host B의 09:00:02는 clock skew 때문에 같지 않을 수 있다. gRPC는 전파할 때 deadline을 이미 소비한 시간을 뺀 timeout duration으로 바꾸어 skew 영향을 줄인다. 각 process 안의 경과 시간은 monotonic clock으로 재고, 분산 trace 상관관계는 wall clock과 skew를 함께 본다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Context tree와 happens-before</h3>
+          <p>Parent cancel은 child의 done signal을 닫고, worker는 select/poll 지점에서 이를 관찰한다. Signal 발생과 worker 종료 사이에는 지연이 있다. Shared result를 쓰는 작업은 “성공 publish”와 “cancel publish” 중 하나만 state를 terminal로 바꾸도록 compare-and-swap, mutex, future completion 같은 동기화가 필요하다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Timer heap, resource leak, cancel function</h3>
+          <p>Deadline context는 runtime timer와 parent→child reference를 가진다. 작업이 일찍 끝났는데 cancel/release 함수를 호출하지 않으면 deadline까지 timer와 child reference가 남을 수 있다. Go 공식 문서는 모든 control-flow path에서 CancelFunc 호출을 요구하며 static analysis도 이를 검사한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Transport cancel과 application cancel</h3>
+          <p>HTTP/2 RST_STREAM, gRPC cancel, TCP close는 peer에게 관심 종료를 알리는 수단이다. 하지만 CPU loop, blocking library, 외부 API, DB engine을 강제 중단하지 않는다. Handler가 cancellation point를 두고 사용 중인 client·driver도 신호를 받을 수 있어야 end-to-end cancellation이 된다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Commit race와 exactly-once 착각</h3>
+          <p>Cancel이 DB commit 직전/직후에 도착할 수 있다. Transaction rollback이 성공하면 “미적용”을 말할 수 있지만 commit 뒤 response가 유실되면 caller는 결과를 모른다. Idempotency key, operation status table, outbox처럼 durable state로 이 모호성을 해소한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">Detach는 예외이지 기본이 아니다</h3>
+          <p>Audit·outbox publish처럼 request 이후 반드시 끝내야 하는 작업을 parent cancellation에서 분리할 수 있다. 단순 background thread로 떼지 말고 durable queue에 넘기고 새 deadline, owner, retry policy를 부여한다. Go의 <code>WithoutCancel</code> 같은 API를 무심코 쓰면 무한 orphan work가 된다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Ingress clamp</td><td style="padding:9px;border:1px solid #dbe3e8;">External deadline/timeout header는 인증된 protocol 규칙으로 parse하고 service min/max 범위로 제한한다. 음수·overflow·무한 값을 거부한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Single budget</td><td style="padding:9px;border:1px solid #dbe3e8;">Hop마다 새 2초 timeout을 만들지 않는다. 최초 deadline에서 elapsed와 serialization/network reserve를 빼 child timeout을 정한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Start gate</td><td style="padding:9px;border:1px solid #dbe3e8;">남은 예산이 예상 최소 실행시간+reserve보다 작으면 downstream을 시작하지 않고 빠르게 budget-exhausted를 반환한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Cancellation point</td><td style="padding:9px;border:1px solid #dbe3e8;">Long loop·queue wait·I/O 전후에 신호를 확인하고, context-aware RPC/DB API를 사용한다. Poll 간격이 실제 cancel latency 상한을 만든다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Fan-out policy</td><td style="padding:9px;border:1px solid #dbe3e8;">All/quorum/first-success 요구사항을 명시하고 성공 조건 뒤 sibling을 취소한다. Partial result 허용 여부와 비용을 API 계약에 넣는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Commit boundary</td><td style="padding:9px;border:1px solid #dbe3e8;">Side effect 전 cancel을 재확인하고, commit 뒤에는 durable operation ID·idempotency key·result lookup을 제공한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Cleanup</td><td style="padding:9px;border:1px solid #dbe3e8;">Timer, pool lease, lock, temp file, stream을 idempotent cleanup으로 해제한다. Cancel 함수는 성공 경로에서도 호출한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">Original/remaining budget, cancel source·cause, propagation delay, handler stop latency, orphan duration, commit-before-cancel 여부를 trace/log/metric으로 남긴다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Canary</td><td style="padding:9px;border:1px solid #dbe3e8;">Cancellation 활성화 뒤 error rate만 보지 말고 CPU·DB active query·pool usage·completed-after-cancel을 비교한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> gRPC deadline 자동 전파와 outgoing RPC 자동 취소 여부는 언어 구현별로 다르다. gRPC 공식 문서는 Java·Go는 deadline 전파가 기본이고 C++은 명시 설정이 필요할 수 있다고 설명한다. Envoy의 route timeout, per-try timeout, stream idle timeout도 서로 다른 timer이므로 실제 release 문서를 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">Client는 timeout/cancel인데 backend CPU·DB active query가 계속 증가, downstream log에 더 긴 deadline, deadline 직후 성공 response, fan-out sibling이 계속 실행, cancelled와 deadline-exceeded가 뒤섞임.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">Trace/request ID, hop별 receive/start/end monotonic duration과 wall timestamp, original/remaining budget, cancel source·cause·수신 시각, worker stop 시각, queue/pool/DB query ID, bytes·stream reset, transaction commit 시각과 idempotency key.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">Context 미전파, hop마다 timeout 재시작, clock skew를 절대 timestamp로 전달, blocking library가 cancel 미지원, handler가 signal 미확인, proxy만 socket close, fan-out sibling 미취소, commit race, background detach 남용.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">한 request ID로 client cancel→proxy→service→DB의 signal/stop timeline을 복원한다. 새 expensive request를 admission control하고, cancellation-aware code path만 canary로 활성화한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 propagation/interceptor config로 되돌리고 stuck query·lease를 ID 기준으로 안전하게 정리한다. Commit 가능성이 있으면 결과 조회·idempotency record로 확인하고 보상한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">모든 worker 강제 kill, DB 전체 restart, 외부 deadline 무조건 신뢰, child budget 연장, cancel 직후 mutation 재시도, 증거 없이 timeout 확대, 모든 작업을 parent에서 detach, cleanup 없이 handler return을 하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: 전달된 metadata와 실제 취소를 구분</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop/Engine과 Compose, 저장소 root, terminal 두 개. 각 단계 전에 “client가 멈추면 proxy와 API도 즉시 멈출까?”를 예측한다. 이 lab은 의도적으로 cancellation을 전파하지 않아 orphan work를 관찰하게 한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 baseline (6분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>make doctor
+make up
+make ps
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -fsS \
+  'http://proxy:8080/api/slow?seconds=1' \
+  -o /dev/null -w 'code=%{http_code} total=%{time_total}\n'</code></pre>
+          <p><strong>예상:</strong> Proxy→API 호출이 약 1초에 HTTP 200으로 끝난다. 이것이 failure injection 전 기준선이다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">1단계 · Client cancellation과 orphan work (10분)</h3>
+          <p><strong>Terminal A:</strong></p>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  logs -f --since=10s api proxy</code></pre>
+          <p><strong>Terminal B:</strong></p>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>time docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl --max-time 2 -v \
+  'http://proxy:8080/api/slow?seconds=4'</code></pre>
+          <p><strong>예상:</strong> Client는 약 2초에 종료하지만 API는 4초 sleep을 계속한다. 이후 proxy 또는 API log에 closed peer/BrokenPipe 계열 오류가 보일 수 있다. Socket close만으로 application 작업이 즉시 중단되지 않는 증거다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">2단계 · Header 전달은 enforcement가 아니다 (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -fsS \
+  -H 'X-Request-Timeout-Ms: 1500' \
+  http://proxy:8080/api/headers</code></pre>
+          <p><strong>예상:</strong> API JSON에 header가 그대로 보인다. 하지만 현재 API는 값을 parse·clamp·timer로 연결하지 않으므로 이것은 metadata propagation일 뿐 deadline enforcement가 아니다. Public header를 곧바로 신뢰하면 안 된다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">3단계 · Remaining budget 산술 (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client python -c '
+import time
+budget = 3.0
+reserve = 0.2
+start = time.monotonic()
+time.sleep(0.8)
+elapsed = time.monotonic() - start
+remaining = max(0.0, budget - elapsed - reserve)
+print(f"original={budget:.1f}s elapsed={elapsed:.3f}s reserve={reserve:.1f}s child_max={remaining:.3f}s")
+'</code></pre>
+          <p><strong>예상:</strong> Child가 쓸 수 있는 시간은 약 2.0초다. Service가 매 hop마다 새 3초를 주면 3-hop chain이 사용자 budget을 크게 초과한다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">4단계 · 증거 정리와 cleanup (5분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  logs --since=5m --timestamps api proxy
+make down</code></pre>
+          <p><strong>관찰 표에 기록:</strong> Client stop, proxy error/finish, API finish의 timestamp와 차이를 적고 “cancel signal 전달 여부 / handler 확인 여부 / 실제 stop latency”를 구분한다. <strong>자주 나는 오류:</strong> Docker가 꺼져 있으면 <code>make doctor</code>에서 중단한다. Log에 오류가 없어도 API가 4초 뒤 완료했다면 orphan work 증거다. <code>time</code> 출력은 host shell 구현에 따라 형식이 다를 수 있다. Cleanup은 다른 container를 삭제하지 않고 <code>make down</code>만 사용한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Deadline을 hop마다 초기화하면 안 된다.</strong> End-to-end budget이 아니라 N×timeout이 된다.</li>
+            <li><strong>절대 timestamp를 다른 host에 그대로 믿지 않는다.</strong> Clock skew를 피해 elapsed를 뺀 duration으로 전달한다.</li>
+            <li><strong>Context 전달과 취소 준수는 다르다.</strong> Library와 handler가 신호를 실제로 확인해야 한다.</li>
+            <li><strong>TCP disconnect는 DB query cancellation이 아니다.</strong></li>
+            <li><strong>CancelFunc는 실패 경로뿐 아니라 성공 경로에서도 호출한다.</strong> Timer/reference leak을 막는다.</li>
+            <li><strong>Fan-out 하나가 성공해도 나머지 sibling을 방치하지 않는다.</strong></li>
+            <li><strong>Deadline exceeded와 user cancelled를 같은 원인으로 집계하지 않는다.</strong></li>
+            <li><strong>Commit 뒤 cancellation을 rollback으로 오해하지 않는다.</strong></li>
+            <li><strong>외부 deadline header와 trace baggage를 무제한 신뢰·전파하지 않는다.</strong></li>
+            <li><strong>Background detach에는 새 owner·deadline·durable queue가 필요하다.</strong></li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“Client 2초 deadline을 4개 microservice에 어떻게 전파하겠습니까?”</strong><br>좋은 답변 구조: 사용자 SLO → root deadline → elapsed·reserve 산술 → duration 전파와 clamp → child≤parent 불변식 → trace metric → language/runtime 차이.</li>
+            <li><strong>“Client가 취소했는데 DB query가 계속 실행됩니다. 어디를 고치겠습니까?”</strong><br>좋은 답변 구조: transport cancel과 handler stop 분리 → context tree → cancellation point → driver cancel 지원 → query ID 증거 → cleanup·rollback → canary.</li>
+            <li><strong>“결제 commit과 cancellation이 경쟁하면 exactly-once를 어떻게 보장합니까?”</strong><br>좋은 답변 구조: failure window → commit point → ambiguous result → idempotency key·operation table·outbox → 결과 조회/보상 → blind retry 금지.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Connect timeout과 request timeout의 clock 범위는 어떻게 다른가?</li>
+            <li>Small write 성공이 remote 처리 성공을 뜻하지 않는 이유는?</li>
+            <li>Timeout 뒤 mutation이 ambiguous할 때 필요한 두 가지 장치는?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① Connect는 connection 준비 구간, request timeout은 DNS부터 body·retry까지 전체 상한이다. ② Byte가 local send buffer에만 복사됐을 수 있다. ③ Idempotency key와 durable result 조회/operation status다.</p>
+
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;">
+            <li>Child deadline이 parent보다 길면 어떤 불변식과 비용이 깨지는가?</li>
+            <li>Cancellation 신호를 보냈는데도 handler가 계속 실행될 수 있는 이유는?</li>
+            <li>반드시 끝내야 하는 post-request 작업을 안전하게 분리하는 방법은?</li>
+          </ol>
+          <p><strong>짧은 정답:</strong> ① End-to-end budget과 자원 회수 시점이 깨져 orphan work가 생긴다. ② 취소는 협력적이며 handler·blocking library·DB driver가 신호를 확인해야 하기 때문이다. ③ Durable queue/outbox로 넘기고 새 owner·deadline·retry·관측성을 부여한다. 문항당 정의 1점, 내부 흐름 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://grpc.io/docs/guides/deadlines/" style="color:#0369a1;">gRPC 공식 가이드 · Deadline 설정, 전파, clock skew 처리</a></li>
+            <li><a href="https://grpc.io/docs/guides/cancellation/" style="color:#0369a1;">gRPC 공식 가이드 · Cancellation과 handler 협력</a></li>
+            <li><a href="https://pkg.go.dev/context" style="color:#0369a1;">Go 표준 library · Context tree, deadline, CancelFunc, cause</a></li>
+            <li><a href="https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts" style="color:#0369a1;">Envoy 공식 문서 · Request, route, per-try, stream idle timeout</a></li>
+          </ul>
+
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 38</strong><br>
+            <span>retry eligibility, exponential backoff, jitter — “실패했으니 다시”가 아니라 재시도 가능한 조건과 전체 부하 예산을 설계합니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

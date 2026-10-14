@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-10-13T09:00:33+09:00",
+  "updatedAt": "2026-10-14T09:01:00+09:00",
   "lessons": [
     {
       "day": 1,
@@ -329,6 +329,15 @@
       "path": "day-36.html",
       "kind": "lesson",
       "publishedAt": "2026-10-13T09:00:33+09:00"
+    },
+    {
+      "day": 37,
+      "week": 6,
+      "title": "deadline propagation과 cancellation",
+      "summary": "End-to-end deadline의 남은 예산을 hop마다 전파하고 cancellation을 handler·fan-out·DB까지 연결해 orphan work와 commit race를 제어합니다.",
+      "path": "day-37.html",
+      "kind": "lesson",
+      "publishedAt": "2026-10-14T09:01:00+09:00"
     }
   ]
 }
