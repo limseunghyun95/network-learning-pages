@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-10-14T09:01:00+09:00",
+  "updatedAt": "2026-10-17T09:03:00+09:00",
   "lessons": [
     {
       "day": 1,
@@ -338,6 +338,15 @@
       "path": "day-37.html",
       "kind": "lesson",
       "publishedAt": "2026-10-14T09:01:00+09:00"
+    },
+    {
+      "day": 38,
+      "week": 6,
+      "title": "retry eligibility, exponential backoff, jitter",
+      "summary": "Retry eligibility를 operation semantics·failure phase·commit ambiguity로 판정하고, deadline 안에서 capped exponential backoff·jitter·retry budget으로 부하 증폭을 제어합니다.",
+      "path": "day-38.html",
+      "kind": "lesson",
+      "publishedAt": "2026-10-17T09:03:00+09:00"
     }
   ]
 }

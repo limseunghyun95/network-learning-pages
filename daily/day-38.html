@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 38</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">RESILIENCE PATTERN · WEEK 6 / DAY 38</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">retry eligibility, exponential backoff, jitter</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">“실패했으니 다시”를 eligibility·deadline·부하 예산이 있는 제어 알고리즘으로 바꾼다 · 이론 60분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Retry는 성공 확률을 높이지만 같은 요청을 추가로 만들어 장애 중인 system의 부하를 키운다. 먼저 operation이 다시 실행돼도 안전한지와 error가 transient인지 판정하고, 남은 deadline 안에서 capped exponential backoff·jitter·retry budget으로 시도 수를 제한한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:31%;font-weight:700;vertical-align:top;">Attempt / retry</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Attempt는 실제 전송 1회다. 첫 attempt 뒤 추가 attempt가 retry다. <code>maxAttempts=3</code>은 보통 최초 1회+retry 2회를 뜻하지만 제품 문서를 확인한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Retry eligibility</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Method semantics, side effect, error class, commit 가능성, 남은 deadline을 보고 재시도해도 되는지 판정하는 조건이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Transient / persistent</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Transient fault는 잠시 뒤 회복할 가능성이 있고, persistent fault는 같은 입력·설정으로 다시 해도 반복된다. 503과 일시적 connection reset은 전자 후보, 인증 실패·잘못된 요청·NXDOMAIN은 보통 후자다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Idempotent</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">동일 operation을 여러 번 요청해도 의도한 server effect가 한 번과 같은 성질이다. HTTP GET·PUT·DELETE는 규격상 idempotent지만 application side effect까지 자동 보장하는 것은 아니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Backoff</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Retry 사이에 기다려 server가 회복할 시간을 주는 정책이다. 즉시 반복은 queue와 connection을 더 압박한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Capped exponential backoff</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;"><code>cap_n = min(maxBackoff, base × 2^(n−1))</code>처럼 상한까지 지수적으로 대기 범위를 늘린다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Jitter</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Backoff에 random 분산을 넣어 다수 client의 재시도 시각을 흩뜨린다. Full jitter는 <code>uniform(0, cap_n)</code>에서 뽑는다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Thundering herd</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">동시에 실패한 client들이 같은 간격으로 다시 몰려 회복 중인 server를 재차 과부하시키는 현상이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Retry budget / token bucket</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">정상 요청 대비 허용 retry 비율 또는 token 수를 제한한다. 성공 시 token을 보충하고 retry 시 소비해 장애 중 fail-fast한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Retry-After / pushback</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Server가 다음 시도까지 기다릴 최소 시간을 알려주는 신호다. HTTP Retry-After와 protocol별 pushback을 client policy·deadline과 함께 적용한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Amplification factor</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">원 요청 수 대비 실제 attempt 수다. 3개 계층이 각각 최대 3번 시도하면 최악에는 downstream attempt가 <code>3³=27</code>까지 늘 수 있다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Commit point</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Operation이 이미 적용됐을 수 있어 transport 실패만으로 미실행을 단정할 수 없는 경계다. gRPC는 response header 수신 뒤 RPC를 committed로 보고 더 이상 자동 retry하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>Retry는 새 부하를 만든다. 1,000 RPS가 실패하고 client가 즉시 3번 더 보내면 4,000 attempts/s가 되어 회복을 늦춘다. 반대로 모든 error를 포기하면 짧은 packet loss나 rolling restart도 사용자 실패가 된다. 핵심은 “몇 번?”보다 “어떤 operation·어떤 failure·어느 계층·어떤 budget에서?”다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>정확성:</strong> 결제 POST를 blind retry하면 duplicate side effect가 생길 수 있다.</li>
+            <li><strong>가용성:</strong> 짧은 transient fault는 retry로 숨길 수 있지만 overload에는 retry가 독이 된다.</li>
+            <li><strong>공정성:</strong> Token budget이 없으면 aggressive client가 server capacity를 더 많이 차지한다.</li>
+            <li><strong>Latency:</strong> Backoff 대기와 attempt timeout의 합이 전체 deadline보다 작아야 한다.</li>
+            <li><strong>면접:</strong> Status code 목록 암기보다 ambiguity, idempotency, jitter 분포, 다계층 증폭과 관측성을 설명해야 한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:13%;">단계</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:46%;">상태 전이 / data path</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:20%;">상태 소유자</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:21%;">판정 증거</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">①</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eaf7fc;">Root request 시작<br>deadline=2,000ms, token=2</td><td style="padding:8px;border:1px solid #dbe3e8;">Caller retry policy</td><td style="padding:8px;border:1px solid #dbe3e8;">method·idempotency key</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">②</td><td style="padding:8px;border:1px solid #dbe3e8;background:#fff7e6;">Attempt 1 → proxy → backend<br>503 + Retry-After</td><td style="padding:8px;border:1px solid #dbe3e8;">Backend·proxy</td><td style="padding:8px;border:1px solid #dbe3e8;">status, headers, bytes</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">③</td><td style="padding:8px;border:1px solid #dbe3e8;background:#f7fafb;">Eligibility gate<br>transient ∧ safe ∧ budget</td><td style="padding:8px;border:1px solid #dbe3e8;">Caller</td><td style="padding:8px;border:1px solid #dbe3e8;">commit 여부·remaining</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">④</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eef2ff;">Full jitter sleep<br>U(0, min(cap, base×2⁰))</td><td style="padding:8px;border:1px solid #dbe3e8;">Timer·PRNG</td><td style="padding:8px;border:1px solid #dbe3e8;">chosen delay</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">⑤</td><td style="padding:8px;border:1px solid #dbe3e8;background:#edf8f2;">Attempt 2, 새 connection/stream<br>같은 operation ID</td><td style="padding:8px;border:1px solid #dbe3e8;">Client transport</td><td style="padding:8px;border:1px solid #dbe3e8;">attempt ID·target</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">⑥</td><td style="padding:8px;border:1px solid #dbe3e8;background:#fceff3;">성공 / non-retryable / budget 소진</td><td style="padding:8px;border:1px solid #dbe3e8;">Operation owner</td><td style="padding:8px;border:1px solid #dbe3e8;">final outcome·cost</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>Root:</strong> Retry loop 밖에서 전체 deadline과 operation ID를 만든다. Attempt마다 deadline을 새로 만들지 않는다.</li>
+            <li><strong>Attempt 1:</strong> DNS·connect·TLS·write·response 단계 중 어디서 실패했는지 기록한다. 503은 overload일 수 있어 즉시 반복하지 않는다.</li>
+            <li><strong>Eligibility:</strong> <code>retryable error ∧ idempotent/deduplicated operation ∧ token available ∧ delay+attempt budget &lt; remaining</code>일 때만 진행한다.</li>
+            <li><strong>Backoff:</strong> Exponential cap이 회복 시간을 주고 jitter가 client synchronization을 푼다. Server pushback이 있으면 local minimum과 상한 정책을 적용한다.</li>
+            <li><strong>Attempt 2:</strong> Network connection은 새것이어도 logical operation ID는 같아야 server가 duplicate를 합칠 수 있다.</li>
+            <li><strong>Terminal:</strong> Success, non-retryable, committed/ambiguous, deadline exceeded, retry budget exhausted 중 정확한 이유로 끝낸다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>설계 불변식:</strong> 한 logical request의 모든 attempt와 sleep은 최초 deadline 안에 있어야 한다. Side effect가 가능한 operation은 idempotency/dedup 증거 없이는 자동 retry하지 않으며, 한 call chain에서 retry owner는 가능한 한 한 계층으로 제한한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Failure window와 ambiguity</h3>
+          <p>SYN 전 실패는 server가 request를 보지 못했을 가능성이 높다. 하지만 request body 전송 뒤 response가 유실되면 server가 이미 commit했을 수 있다. Transport의 “응답 없음”과 application의 “미적용”은 다르므로 method semantics와 idempotency key가 retry safety를 결정한다.</p>
+          <h3 style="font-size:18px;color:#075985;">Backoff 분포</h3>
+          <p>Capped exponential 값이 800ms라면 deterministic client는 모두 800ms 뒤 몰린다. Full jitter는 0~800ms 균등분포, equal jitter는 400~800ms, decorrelated jitter는 이전 delay를 기반으로 다음 범위를 만든다. 평균 latency·burst 완화·최소 휴식의 trade-off가 다르다.</p>
+          <h3 style="font-size:18px;color:#075985;">Positive feedback와 queueing</h3>
+          <p>Server 처리율보다 도착률이 크면 queue가 늘고 latency가 상승해 timeout→retry→도착률 증가가 반복된다. Retry budget과 load shedding은 이 feedback loop의 gain을 낮춘다. Timeout만 늘리면 Little’s Law의 체류시간과 동시 점유가 더 커질 수 있다.</p>
+          <h3 style="font-size:18px;color:#075985;">다계층 곱셈</h3>
+          <p>Client, gateway, service가 각각 3 attempts를 허용하면 최하단은 최대 27번 호출될 수 있다. 그래서 가장 많은 context를 가진 edge 또는 service 한 곳을 retry owner로 정하고 다른 계층의 transparent retry까지 inventory한다.</p>
+          <h3 style="font-size:18px;color:#075985;">Token bucket과 회복</h3>
+          <p>Retry token은 성공 시 보충하고 추가 attempt에서 소비한다. 장애로 성공이 줄면 token이 고갈되어 fail-fast하고 server가 회복할 공간을 만든다. Tenant·resource별 bucket을 분리하지 않으면 한 noisy tenant가 다른 tenant retry를 막을 수 있다.</p>
+          <h3 style="font-size:18px;color:#075985;">관측 편향</h3>
+          <p>최종 성공만 기록하면 첫 실패와 추가 부하가 사라진다. Logical request latency, attempt별 latency, backoff sleep, retry success rate, amplification factor를 따로 기록하고 load test는 원래 도착률을 고정해 coordinated omission을 피한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Eligibility matrix</td><td style="padding:9px;border:1px solid #dbe3e8;">Method·operation·error·commit 가능성별 allow/deny를 명시한다. 일반적으로 429/502/503/504와 일부 I/O fault는 후보지만 400/401/403, TLS 인증 오류, NXDOMAIN은 동일 조건에서 반복하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Idempotency</td><td style="padding:9px;border:1px solid #dbe3e8;">GET이라는 이름만 믿지 말고 실제 side effect를 검토한다. POST mutation은 idempotency key·operation status 없이는 자동 retry하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">One owner</td><td style="padding:9px;border:1px solid #dbe3e8;">Call chain에서 retry 계층을 하나로 제한하고 SDK·proxy·service의 숨은 retry를 inventory한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Deadline gate</td><td style="padding:9px;border:1px solid #dbe3e8;">예상 delay+per-attempt timeout+response reserve가 remaining budget보다 크면 sleep하거나 새 attempt를 시작하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Full jitter</td><td style="padding:9px;border:1px solid #dbe3e8;">Base·multiplier·cap을 명시하고 production-quality PRNG로 각 client를 분산한다. Process마다 같은 seed를 고정하지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Server pushback</td><td style="padding:9px;border:1px solid #dbe3e8;">Retry-After를 parse하되 전체 deadline·최대 허용 대기와 결합한다. 잘못된 값은 무한 대기나 busy loop로 만들지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Budget</td><td style="padding:9px;border:1px solid #dbe3e8;">Retry ratio/token을 tenant·resource 단위로 제한하고 budget 소진 시 원 error를 보존해 fail-fast한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">Logical request ID, attempt number/ID, reason, target, delay, remaining deadline, token, final outcome을 trace와 metric에 기록한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Canary</td><td style="padding:9px;border:1px solid #dbe3e8;">최종 성공률뿐 아니라 attempts/request, downstream RPS, tail latency, token exhaustion, duplicate effect를 비교하고 즉시 rollback한다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> gRPC는 policy의 retryable status, maxAttempts, backoff와 ±20% jitter를 지원하고 response header 수신 뒤 committed로 본다. AWS SDK standard mode는 retry quota와 full jitter를 사용한다. Default attempt 수·retryable error·transparent retry는 SDK/언어/version마다 달라 공식 문서를 확인한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:24%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">장애 때 downstream RPS 급증, 503가 주기적으로 출렁임, 같은 시각 retry burst, client timeout 증가, duplicate 주문, retry 성공률은 높지만 tail latency·비용 악화.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">Logical request·attempt ID, 계층별 maxAttempts, SDK/proxy transparent retry, status/errno와 Retry-After, idempotency key·commit 시각, chosen backoff, remaining deadline, retry token, attempts/request·RPS·queue·pool·CPU.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">모든 계층 retry, jitter 없음/동일 seed, non-idempotent retry, 4xx 오분류, deadline 재설정, Retry-After 무시, token bucket 미분리, cap 너무 짧음, overload에 retry, 최종 성공만 집계.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">한 request를 attempt tree로 복원하고 retry owner를 확인한다. 신규 retry budget을 줄여 fail-fast하고, 429/503 pushback을 존중하며, admission control로 원 트래픽도 보호한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">직전 retry policy·SDK mode로 rollback하고 canary traffic에서 attempts/request와 duplicate를 확인한다. 중복 mutation은 idempotency record·operation lookup으로 식별해 보상한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">즉시 무제한 retry, 모든 5xx/timeout 일괄 retry, 각 계층 attempt 수 확대, POST blind replay, jitter 제거, deadline 연장, server 전체 restart, retry 성공률만 보고 정상 판정을 하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: 503 burst와 full jitter 비교</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop/Engine과 Compose, 저장소 root. 실행 전에 즉시 5회 retry와 jitter 5회 retry가 API log·총 소요시간에 어떤 차이를 만들지 예측한다.</p>
+          <h3 style="font-size:18px;color:#075985;">0단계 · 시작과 단일 실패 (5분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>make doctor
+make up
+make ps
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sS -o /dev/null -w 'code=%{http_code} total=%{time_total}\n' \
+  http://proxy:8080/api/status/503</code></pre>
+          <p><strong>예상:</strong> API가 의도적으로 503을 반환한다. 이것이 failure injection이며 network timeout과 달리 server 응답 증거가 있다.</p>
+          <h3 style="font-size:18px;color:#075985;">1단계 · Anti-pattern: 즉시 5 attempts (7분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml exec client sh -c '
+for n in 1 2 3 4 5; do
+  curl -sS -o /dev/null -w "attempt=$n code=%{http_code} total=%{time_total}\n" \
+    http://proxy:8080/api/status/503
+done
+'</code></pre>
+          <p><strong>예상:</strong> 5개 request가 거의 연속 도착한다. Client가 많다면 같은 burst가 겹쳐 장애 중인 server를 더 압박한다.</p>
+          <h3 style="font-size:18px;color:#075985;">2단계 · Full jitter와 eligibility gate (13분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml exec client python -c '
+import random, time, urllib.error, urllib.request
+url = "http://proxy:8080/api/status/503"
+deadline = time.monotonic() + 4.0
+base, cap, max_attempts = 0.2, 1.6, 5
+for attempt in range(1, max_attempts + 1):
+    try:
+        urllib.request.urlopen(url, timeout=max(0.1, deadline-time.monotonic()))
+        print("success", attempt); break
+    except urllib.error.HTTPError as exc:
+        retryable = exc.code in (429, 502, 503, 504)
+        remaining = deadline - time.monotonic()
+        print(f"attempt={attempt} code={exc.code} retryable={retryable} remaining={remaining:.3f}s")
+        limit = min(cap, base * (2 ** (attempt - 1)))
+        delay = random.uniform(0, limit)
+        if not retryable or attempt == max_attempts or delay + 0.2 >= remaining:
+            print("stop: eligibility/attempt/deadline gate"); break
+        print(f"sleep={delay:.3f}s cap={limit:.3f}s")
+        time.sleep(delay)
+'</code></pre>
+          <p><strong>예상:</strong> Delay 상한은 0.2→0.4→0.8→1.6초로 증가하고 실제 sleep은 0부터 상한 사이에 분산된다. 남은 budget이 부족하면 5회 전에 종료할 수 있다.</p>
+          <h3 style="font-size:18px;color:#075985;">3단계 · Non-retryable과 증폭 계산 (5분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sS -o /dev/null -w '400 code=%{http_code}\n' \
+  http://proxy:8080/api/status/400
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client python -c 'print("3 layers × 3 attempts =", 3**3, "downstream attempts")'</code></pre>
+          <p><strong>예상:</strong> 400은 같은 입력을 반복해도 고쳐지지 않으므로 1회에서 멈춘다. 세 계층 retry는 최악 27 attempts로 증폭된다.</p>
+          <h3 style="font-size:18px;color:#075985;">4단계 · 증거와 cleanup (5분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  logs --since=10m --timestamps api proxy
+make down</code></pre>
+          <p><strong>자주 나는 오류:</strong> Docker가 꺼져 있으면 <code>make doctor</code>에서 중단한다. Random delay는 실행마다 다르다. Python command quoting이 깨지면 single quote 바깥에 문자를 붙이지 않는다. Lab의 503은 항상 실패하므로 “최종 성공”이 아니라 attempt 분산과 stop gate를 관찰한다. Cleanup은 <code>make down</code>만 사용한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Retryable status와 retryable operation은 별개다.</strong> 503이어도 non-idempotent commit이 가능하면 위험하다.</li>
+            <li><strong>MaxAttempts와 maxRetries를 혼동하지 않는다.</strong></li>
+            <li><strong>Deadline을 attempt마다 리셋하지 않는다.</strong></li>
+            <li><strong>Exponential backoff만으로 herd가 사라지지 않는다.</strong> Jitter가 필요하다.</li>
+            <li><strong>모든 process에 같은 random seed를 쓰지 않는다.</strong></li>
+            <li><strong>Retry-After를 무시하거나 무한히 신뢰하지 않는다.</strong></li>
+            <li><strong>Proxy·SDK의 transparent retry를 inventory한다.</strong></li>
+            <li><strong>Retry budget을 tenant별로 격리하지 않으면 noisy neighbor가 생긴다.</strong></li>
+            <li><strong>최종 성공만 기록하면 실패율·부하·latency가 가려진다.</strong></li>
+            <li><strong>Overload의 1차 처방은 capacity/admission/load shedding이지 retry 확대가 아니다.</strong></li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“어떤 HTTP/gRPC 실패를 자동 retry하겠습니까?”</strong><br>좋은 답변 구조: operation semantics·idempotency → failure phase·status → commit ambiguity → deadline·token → server pushback → 예외와 관측성.</li>
+            <li><strong>“Exponential backoff에 왜 jitter가 필요하고 어떤 분포를 쓰겠습니까?”</strong><br>좋은 답변 구조: synchronized clients와 herd → capped formula → full/equal/decorrelated 비교 → latency·burst trade-off → PRNG seed → metric.</li>
+            <li><strong>“3-tier system의 retry storm을 막는 설계를 제안하세요.”</strong><br>좋은 답변 구조: 3³ amplification 수치 → single owner → retry budget/token bucket → deadline gate → load shedding → canary/rollback.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;"><li>Child deadline이 parent보다 길어지면 안 되는 이유는?</li><li>Transport cancel과 handler 종료가 같은 사건이 아닌 이유는?</li><li>Commit 이후 반드시 끝낼 작업을 안전하게 분리하는 방법은?</li></ol>
+          <p><strong>짧은 정답:</strong> ① End-to-end budget과 자원 회수 시점이 깨진다. ② Cancellation은 협력적이라 handler·driver가 신호를 확인해야 한다. ③ Durable queue/outbox에 새 owner·deadline·retry policy로 넘긴다.</p>
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;"><li>503을 받았는데도 retry하면 안 되는 두 조건은?</li><li>Full jitter의 식과 해결하는 문제는?</li><li>각각 3 attempts인 세 계층이 만드는 최악의 downstream attempt 수는?</li></ol>
+          <p><strong>짧은 정답:</strong> ① Non-idempotent/commit ambiguity, deadline·retry budget 부족이다. ② <code>uniform(0, min(cap, base×2^(n−1)))</code>이며 synchronized herd를 분산한다. ③ 27회다. 문항당 정의 1점, 내부 흐름 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://www.rfc-editor.org/rfc/rfc9110.html" style="color:#0369a1;">IETF RFC 9110 · Idempotent method와 Retry-After</a></li>
+            <li><a href="https://grpc.io/docs/guides/retry/" style="color:#0369a1;">gRPC 공식 가이드 · Retry policy, commit, backoff와 jitter</a></li>
+            <li><a href="https://docs.aws.amazon.com/sdkref/latest/guide/feature-retry-behavior.html" style="color:#0369a1;">AWS SDK 공식 문서 · Standard/adaptive retry, quota, full jitter</a></li>
+            <li><a href="https://docs.aws.amazon.com/wellarchitected/latest/framework/rel_mitigate_interaction_failure_limit_retries.html" style="color:#0369a1;">AWS Well-Architected · Retry 제한, backoff, jitter</a></li>
+          </ul>
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 39</strong><br>
+            <span>idempotency key와 duplicate side effect — 여러 attempt를 하나의 logical operation으로 수렴시키는 저장·경쟁·TTL 설계를 다룹니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
