@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-10-17T09:03:00+09:00",
+  "updatedAt": "2026-10-18T09:17:34+09:00",
   "lessons": [
     {
       "day": 1,
@@ -347,6 +347,15 @@
       "path": "day-38.html",
       "kind": "lesson",
       "publishedAt": "2026-10-17T09:03:00+09:00"
+    },
+    {
+      "day": 39,
+      "week": 6,
+      "title": "idempotency key와 duplicate side effect",
+      "summary": "여러 network attempt를 하나의 logical operation으로 수렴시키기 위해 idempotency key의 scope·fingerprint·원자적 상태 전이·transaction/outbox·TTL을 설계합니다.",
+      "path": "day-39.html",
+      "kind": "lesson",
+      "publishedAt": "2026-10-18T09:17:34+09:00"
     }
   ]
 }
