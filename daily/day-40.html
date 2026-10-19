@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 40</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f6f8;color:#17212b;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',Arial,sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f3f6f8;">
+    <tr><td align="center" style="padding:20px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dbe3e8;border-radius:14px;overflow:hidden;">
+        <tr><td style="background:#082f49;padding:30px 26px;color:#ffffff;">
+          <div style="font-size:13px;letter-spacing:1.5px;color:#7dd3fc;font-weight:700;">RESILIENCE PATTERN · WEEK 6 / DAY 40</div>
+          <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.3;color:#ffffff;">pool, queue, bulkhead, circuit breaker, rate limit</h1>
+          <p style="margin:0;color:#d5edf7;font-size:16px;">제한된 capacity를 숫자로 모델링하고 overload를 admission 단계에서 끊는 설계 · 이론 70분 + 실습 35분</p>
+        </td></tr>
+        <tr><td style="padding:26px;">
+          <div style="background:#eaf7fc;border-left:5px solid #0284c7;padding:16px 18px;margin-bottom:28px;">
+            <strong style="color:#075985;">한 줄 요약</strong><br>
+            Pool은 재사용할 자원의 동시성 상한, queue는 잠시 기다릴 작업의 유한 buffer, bulkhead는 실패 범위의 격리, circuit breaker는 실패하는 dependency 호출의 임시 차단, rate limit은 유입량의 admission 정책이다. 이들을 무한 대기열이나 큰 pool로 대체하지 말고 deadline·capacity·공정성에 맞춰 함께 설계한다.
+          </div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:30px 0 14px;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;width:32%;font-weight:700;vertical-align:top;">Capacity</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">System이 목표 latency와 오류율 안에서 처리할 수 있는 작업량이다. CPU, DB connection, downstream concurrency, bandwidth 중 가장 작은 병목이 상한을 만든다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Concurrency</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">동시에 진행 중인 작업 수다. 같은 RPS라도 service time이 길어지면 필요한 concurrency가 증가한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Pool</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Connection·thread·worker처럼 생성 비용이 큰 자원을 재사용하는 집합이다. Pool size는 dependency가 감당할 수 있는 동시성 budget이어야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Queue</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">즉시 실행하지 못한 작업이 기다리는 buffer다. 메모리만 있으면 되는 무료 capacity가 아니라 deadline을 소비하는 숨은 latency다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Backpressure</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">Consumer가 느릴 때 producer의 속도를 늦추거나 거부해 work-in-progress가 무한히 늘지 않게 하는 feedback이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Bulkhead</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">선박의 격벽처럼 자원을 dependency·tenant·priority별로 분리해 한 구역의 고갈이 전체를 삼키지 않게 하는 패턴이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Circuit breaker</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">최근 실패·지연이 임계치를 넘으면 remote call을 잠시 차단하고, 제한된 probe로 회복을 확인하는 상태기계다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Rate limit / quota</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">시간 단위 허용 요청량 또는 tenant별 사용 한도다. 지속률과 순간 burst를 구분해야 한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Token bucket</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">일정 rate로 token을 보충하고 요청마다 소비한다. Bucket 크기만큼 burst를 허용하면서 장기 평균률을 제한한다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Load shedding</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;">이미 처리 능력을 넘은 low-value/late work를 빨리 거부해 남은 요청의 성공률과 recovery space를 지키는 정책이다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dbe3e8;background:#f7fafb;font-weight:700;vertical-align:top;">Little’s Law</td><td style="padding:10px;border:1px solid #dbe3e8;vertical-align:top;"><code>L = λ × W</code>. 안정 상태에서 system 안 평균 작업 수 L은 arrival rate λ와 평균 체류시간 W의 곱이다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">2. 왜 중요한가</h2>
+          <p>정상 100 RPS, service time 100ms인 dependency는 평균 concurrency가 약 10이다. 같은 유입에서 service time이 2초로 늘면 concurrency는 200이 된다. Pool이 50이라면 150개가 queue에서 기다리고, timeout 뒤 retry까지 들어오면 도착률이 증가한다. “응답이 느려서 queue를 늘린다”는 처방은 실패를 늦게 보여줄 뿐 recovery를 어렵게 할 수 있다.</p>
+          <ul style="padding-left:22px;">
+            <li><strong>Pool:</strong> Connection 생성 비용은 줄이지만 downstream CPU·lock·IO capacity를 만들지는 않는다.</li>
+            <li><strong>Queue:</strong> 짧은 burst를 흡수하지만 지속 overload에서는 stale work와 memory를 쌓는다.</li>
+            <li><strong>Bulkhead:</strong> 중요 traffic과 느린 dependency를 격리해 blast radius를 제한한다.</li>
+            <li><strong>Circuit breaker:</strong> 실패가 지속될 때 timeout까지 자원을 점유하는 call을 fail-fast한다.</li>
+            <li><strong>Rate limit/load shedding:</strong> 비싼 work가 시작되기 전에 admission을 제어한다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;font-size:15px;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:12%;">단계</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:46%;">Data path / 상태 전이</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:21%;">상태 소유자</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:21%;">거부·관측</th></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">①</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eaf7fc;">Client request + deadline<br>→ edge token bucket</td><td style="padding:8px;border:1px solid #dbe3e8;">Gateway limiter</td><td style="padding:8px;border:1px solid #dbe3e8;">429·Retry-After·tenant tokens</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">②</td><td style="padding:8px;border:1px solid #dbe3e8;background:#fff7e6;">Priority/tenant bulkhead<br>→ concurrency permit</td><td style="padding:8px;border:1px solid #dbe3e8;">Semaphore/worker pool</td><td style="padding:8px;border:1px solid #dbe3e8;">permit wait·rejection</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">③</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eef2ff;">Bounded queue<br>enqueue only if wait budget remains</td><td style="padding:8px;border:1px solid #dbe3e8;">Application scheduler</td><td style="padding:8px;border:1px solid #dbe3e8;">depth·age·overflow</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">④</td><td style="padding:8px;border:1px solid #dbe3e8;background:#edf8f2;">Circuit CLOSED?<br>→ pool acquire → TCP/HTTP call</td><td style="padding:8px;border:1px solid #dbe3e8;">Caller/proxy</td><td style="padding:8px;border:1px solid #dbe3e8;">active/pending connections</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">⑤</td><td style="padding:8px;border:1px solid #dbe3e8;background:#fceff3;">Slow/error ratio exceeds threshold<br><code>CLOSED → OPEN</code></td><td style="padding:8px;border:1px solid #dbe3e8;">Breaker state</td><td style="padding:8px;border:1px solid #dbe3e8;">fail-fast·fallback</td></tr>
+            <tr><td style="padding:8px;border:1px solid #dbe3e8;text-align:center;">⑥</td><td style="padding:8px;border:1px solid #dbe3e8;background:#eaf7fc;">Cooldown → HALF_OPEN<br>limited probes → CLOSED/OPEN</td><td style="padding:8px;border:1px solid #dbe3e8;">Breaker timer/counter</td><td style="padding:8px;border:1px solid #dbe3e8;">probe success·reopen count</td></tr>
+          </table>
+          <p style="text-align:center;color:#526571;font-weight:700;">Request → rate limit → bulkhead permit → bounded queue → circuit gate → connection pool → dependency<br>↖ overflow/late work는 앞단에서 빠르게 거부</p>
+          <ol style="padding-left:22px;">
+            <li><strong>Rate gate:</strong> Identity/tenant/endpoint별 token을 확인한다. 거부할 work를 TLS 종료·JSON parse·DB query 뒤에 판단하면 이미 capacity를 썼다.</li>
+            <li><strong>Bulkhead:</strong> Critical과 batch, dependency A와 B가 같은 semaphore·thread·pool을 공유하지 않게 한다.</li>
+            <li><strong>Queue:</strong> Queue capacity와 최대 age를 둔다. 예상 queue wait가 remaining deadline을 넘으면 enqueue하지 않는다.</li>
+            <li><strong>Circuit gate:</strong> OPEN이면 pool을 획득하지 않고 즉시 degrade한다. Rate limit과 달리 dependency health signal에 반응한다.</li>
+            <li><strong>Pool:</strong> Permit을 얻은 요청만 connection/stream을 사용한다. HTTP/2는 connection 수와 stream concurrency를 따로 본다.</li>
+            <li><strong>Recovery:</strong> HALF_OPEN probe 수를 제한해 회복 중인 dependency를 재차 flood하지 않는다.</li>
+          </ol>
+          <div style="background:#f7fafb;border:1px solid #cbd8de;padding:15px 16px;"><strong>설계 불변식:</strong> 모든 대기열은 유한하고 deadline-aware다. 동시성 상한은 downstream capacity 이하다. 한 bulkhead의 포화가 다른 중요 경로의 permit을 소비하지 않는다. OPEN breaker는 retryable error가 아니라 admission 거부 신호로 취급한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">4. CS 수준 내부 동작</h2>
+          <h3 style="font-size:18px;color:#075985;">Queueing과 tail latency</h3>
+          <p>Utilization이 100%에 가까워질수록 작은 service-time 변동도 queue wait를 크게 늘린다. 200 RPS에서 평균 50ms면 in-flight 평균은 10이지만 p99 500ms 동안 순간 concurrency는 100까지 필요할 수 있다. 평균만으로 pool을 정하지 말고 tail·burst·deadline을 함께 측정한다.</p>
+          <h3 style="font-size:18px;color:#075985;">Pool sizing은 capacity allocation</h3>
+          <p>DB max connection이 200이고 application instance가 20개면 instance당 pool 20은 총 400으로 이미 초과한다. Migration·admin·failover 여유를 남긴 뒤 <code>per-instance budget ≤ usable downstream connections / max instances</code>로 시작한다. Pool 대기시간과 query 시간을 분리한다.</p>
+          <h3 style="font-size:18px;color:#075985;">Bounded queue와 stale work</h3>
+          <p>Queue가 1,000이고 worker 10개가 각 100ms라면 drain rate는 이상적으로 100/s다. 가득 찬 queue 끝의 작업은 약 10초 뒤 시작한다. Deadline 2초라면 8초 전에 이미 가치가 없는 work다. Queue length보다 oldest age와 deadline slack이 더 직접적인 증거다.</p>
+          <h3 style="font-size:18px;color:#075985;">Bulkhead의 비용</h3>
+          <p>격리는 blast radius를 줄이지만 idle capacity fragmentation을 만든다. Hard partition, reserved+borrowable capacity, priority queue 중 요구사항을 선택한다. Borrowing을 허용하면 overload 시 reserve를 즉시 회수할 수 있어야 한다.</p>
+          <h3 style="font-size:18px;color:#075985;">Circuit breaker 상태기계</h3>
+          <p><code>CLOSED</code>는 call을 통과시키며 sliding window를 관측한다. Failure/slow-call 비율과 최소 sample 수를 만족하면 <code>OPEN</code>으로 전이한다. Cooldown 후 <code>HALF_OPEN</code>에서 제한된 probe만 통과시켜 충분히 성공하면 CLOSED, 하나라도 치명적으로 실패하면 OPEN으로 돌아간다. 전 process에 동일한 global breaker를 두면 coordination 비용과 false sharing이 생긴다.</p>
+          <h3 style="font-size:18px;color:#075985;">Rate limit 알고리즘</h3>
+          <p>Fixed window는 경계에서 2배 burst가 가능하다. Sliding window는 더 정확하지만 상태 비용이 크다. Token bucket은 refill rate <code>r</code>과 bucket size <code>b</code>로 장기률과 burst를 제어한다. Concurrency limiter는 RPS가 아니라 진행 중 work를 제한해 latency 증가에 더 직접 반응한다.</p>
+          <h3 style="font-size:18px;color:#075985;">Control plane과 data plane</h3>
+          <p>Threshold·quota·routing은 control plane 설정이고 각 request의 token/permit/circuit 판정은 data plane이다. 중앙 limiter 장애 때 fail-open/fail-closed 정책, local cache 오차, shard hot spot을 미리 정한다. Distributed limiter는 완벽한 전역 정확도와 low latency·availability 사이 trade-off가 있다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">5. 실무 설계 판단과 best practice</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:31%;">판단</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">권장 기준과 이유</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Capacity baseline</td><td style="padding:9px;border:1px solid #dbe3e8;">Load test로 latency SLO가 꺾이는 sustainable throughput/concurrency를 찾고 100%가 아닌 안전 여유를 둔다. Autoscaling lag 동안 버틸 admission limit이 필요하다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Pool</td><td style="padding:9px;border:1px solid #dbe3e8;">모든 instance의 총합, failover instance 수, protocol stream limit, connection establishment cost를 계산한다. Acquire timeout은 request deadline보다 짧게 둔다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Queue</td><td style="padding:9px;border:1px solid #dbe3e8;">Length와 max age를 제한하고 FIFO만 고집하지 않는다. Deadline expired/low-priority work를 drop하고 overflow reason을 metric으로 남긴다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Bulkhead</td><td style="padding:9px;border:1px solid #dbe3e8;">Dependency·tenant·priority 중 실제 failure domain에 맞춰 semaphore/thread/connection pool을 분리한다. Critical reserve와 borrow/reclaim 규칙을 문서화한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Circuit breaker</td><td style="padding:9px;border:1px solid #dbe3e8;">최소 sample, sliding window, slow threshold, open duration, half-open probes를 명시한다. 4xx business error를 dependency failure로 세지 않는다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Rate limit</td><td style="padding:9px;border:1px solid #dbe3e8;">IP 하나가 아니라 authenticated tenant/API key/resource cost를 고려한다. 429와 retry hint를 주되 client retry storm을 budget으로 제한한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Load shedding</td><td style="padding:9px;border:1px solid #dbe3e8;">싼 check를 앞에 두고 optional enrichment·batch·stale request를 먼저 버린다. 거부율 상승이 SLO 보호의 성공일 수 있음을 dashboard에 반영한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">Observability</td><td style="padding:9px;border:1px solid #dbe3e8;">Arrival/admitted/rejected/completed rate, active/pending, oldest age, pool acquire time, breaker state, token balance, dependency latency를 한 timeline에 둔다.</td></tr>
+          </table>
+          <div style="margin-top:14px;background:#fff7e6;border-left:5px solid #f59e0b;padding:14px 16px;"><strong>Version/engine 차이:</strong> HTTP/1.1 pool은 보통 connection당 한 active request지만 HTTP/2·3는 stream을 multiplex하므로 connection count만으로 concurrency를 판단할 수 없다. Envoy의 circuit breaking은 max connections·pending·active requests·retries·connection pools를 cluster/priority별로 제한하며 worker 간 counter는 eventually consistent라 순간 초과가 가능하다. Library breaker의 기본 threshold·window·exception 분류는 version마다 다르므로 명시적으로 설정한다.</div>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;overflow-wrap:anywhere;">
+            <tr><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;width:26%;">순서</th><th style="padding:8px;border:1px solid #dbe3e8;background:#082f49;color:#fff;">실행 내용</th></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">증상</td><td style="padding:9px;border:1px solid #dbe3e8;">P99와 timeout 급증, pool acquire 대기, queue depth/age 상승, thread·connection 고갈, 429/503 증가, breaker OPEN 반복, 정상 dependency까지 실패.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">먼저 수집할 증거/지표</td><td style="padding:9px;border:1px solid #dbe3e8;">Arrival/admission/completion RPS, active·pending·oldest queue age, pool active/idle/acquire wait, dependency service time/error class, breaker transition·sample 수, limiter key별 token/reject, retry amplification, CPU·memory·fd·ephemeral port.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">가능한 가설</td><td style="padding:9px;border:1px solid #dbe3e8;">Downstream slowdown, unbounded queue, pool 총합이 DB 상한 초과, noisy tenant, retry storm, shared bulkhead, breaker가 4xx를 failure로 계산, HALF_OPEN probe flood, autoscaling lag, limiter hot shard.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">안전한 첫 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">Low-priority admission을 낮추고 queue max age/deadline expired work를 drop한다. Retry를 줄이고 critical reserve를 보호하며, 이미 검증된 fallback만 활성화한다. Pool을 즉시 키우기 전에 downstream headroom을 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">rollback/복구</td><td style="padding:9px;border:1px solid #dbe3e8;">최근 threshold/pool/timeout 배포를 rollback하고 overload 전 안전값으로 복원한다. Queue를 drain하되 expired work는 폐기하고, capacity가 회복된 뒤 limiter와 HALF_OPEN probe를 단계적으로 풀어 canary metric을 확인한다.</td></tr>
+            <tr><td style="padding:9px;border:1px solid #dbe3e8;font-weight:700;">하지 말아야 할 조치</td><td style="padding:9px;border:1px solid #dbe3e8;">Queue·pool·timeout을 동시에 확대, breaker 강제 CLOSED, 모든 tenant limit 해제, 무제한 retry, process 전체 restart로 증거 삭제, 429를 즉시 retry, critical/batch queue 합치기, CPU만 보고 정상 판정하지 않는다.</td></tr>
+          </table>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">7. 35분 실습: slow dependency에서 queue와 admission 비교</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop/Engine, Compose, 저장소 root. 실행 전 20개 요청을 5개 worker로 2초 slow endpoint에 보낼 때 마지막 요청의 최소 시작 지연을 예측한다.</p>
+          <h3 style="font-size:18px;color:#075985;">0단계 · Lab 시작과 단일 latency 확인 (5분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>make doctor
+make up
+docker compose -f labs/basic-network-observability/docker-compose.yml \
+  exec client curl -sS -o /dev/null \
+  -w 'code=%{http_code} total=%{time_total}\n' \
+  'http://proxy:8080/api/slow?seconds=2'</code></pre>
+          <p><strong>예상:</strong> HTTP 200이지만 약 2초가 걸린다. Error rate만 보는 breaker는 slow dependency를 놓칠 수 있다.</p>
+          <h3 style="font-size:18px;color:#075985;">1단계 · Anti-pattern: worker 뒤 긴 queue (10분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml exec client python -c '
+import concurrent.futures,time,urllib.request
+url="http://proxy:8080/api/slow?seconds=2"
+t0=time.monotonic()
+def one(i):
+    start=time.monotonic()-t0
+    urllib.request.urlopen(url,timeout=12).read()
+    return i,start,time.monotonic()-t0
+with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+    for row in ex.map(one,range(20)): print("id=%02d start=%.2f done=%.2f"%row)
+'</code></pre>
+          <p><strong>예상:</strong> 5개씩 네 wave가 실행되고 마지막 wave는 약 6초 뒤 시작해 8초쯤 끝난다. Request timeout이 3초라면 queue의 뒤쪽 work는 시작 전부터 성공 불가능하다.</p>
+          <h3 style="font-size:18px;color:#075985;">2단계 · Bounded admission과 bulkhead (12분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml exec client python -c '
+import concurrent.futures,threading,time,urllib.request
+url="http://proxy:8080/api/slow?seconds=2"; permits=threading.BoundedSemaphore(5); t0=time.monotonic()
+def one(i):
+    if not permits.acquire(timeout=0.05): return i,"SHED",time.monotonic()-t0
+    try:
+        urllib.request.urlopen(url,timeout=3).read(); return i,"OK",time.monotonic()-t0
+    finally: permits.release()
+with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+    rows=list(ex.map(one,range(20)))
+print("ok",sum(r[1]=="OK" for r in rows),"shed",sum(r[1]=="SHED" for r in rows))
+print(rows)
+'</code></pre>
+          <p><strong>예상:</strong> 약 5개만 downstream에 들어가고 나머지는 50ms 안에 SHED된다. 총 성공 수는 적어 보이지만 accepted request의 latency와 downstream 회복 공간을 지킨다. Critical traffic에는 별도 semaphore를 두는 것이 bulkhead다.</p>
+          <h3 style="font-size:18px;color:#075985;">3단계 · 증거·계산·cleanup (8분)</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:#102a3a;color:#e8f4f8;padding:14px;border-radius:8px;font-size:14px;overflow-wrap:anywhere;"><code>docker compose -f labs/basic-network-observability/docker-compose.yml \
+  logs --since=10m --timestamps api proxy
+python3 -c 'print("Little Law: 100 RPS × 0.1s =",100*0.1,"in-flight; slow 2s =",100*2,"in-flight")'
+make down</code></pre>
+          <p><strong>자주 나는 오류와 해결:</strong> Docker가 꺼졌으면 <code>make doctor</code>에서 멈춘다. <code>make up</code> 직후 connection refused가 나면 proxy가 아직 listen 전이므로 <code>make ps</code>와 log를 확인하고 readiness 뒤 다시 실행한다. Timeout은 환경 부하에 따라 달라질 수 있다. Lab server 구현이 single-thread라면 실제 처리율이 더 낮아지는 것도 관측 대상이다. 429/503을 직접 내는 production limiter와 달리 실습의 SHED는 client-side 문자열이다. Cleanup은 <code>make down</code>만 사용한다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>Pool을 키우면 capacity가 생긴다고 믿지 않는다.</strong> Downstream bottleneck과 총 instance 수를 본다.</li>
+            <li><strong>Queue depth 0이 항상 좋은 것은 아니다.</strong> Pool 과대·직접 overload일 수 있다.</li>
+            <li><strong>Queue length만 보지 말고 oldest age와 deadline slack을 본다.</strong></li>
+            <li><strong>Bulkhead를 같은 thread pool 위 label만 나눠 구현하지 않는다.</strong></li>
+            <li><strong>Circuit breaker와 rate limiter를 혼동하지 않는다.</strong> 전자는 health, 후자는 admission/fairness다.</li>
+            <li><strong>Breaker의 최소 sample 없이 낮은 비율 threshold를 쓰면 저트래픽에서 오작동한다.</strong></li>
+            <li><strong>HALF_OPEN에 모든 대기 요청을 풀지 않는다.</strong></li>
+            <li><strong>429에 retry-after·jitter·budget 없이 즉시 retry하지 않는다.</strong></li>
+            <li><strong>Global limiter만 두면 hot tenant와 critical traffic을 구분하지 못한다.</strong></li>
+            <li><strong>Autoscaling은 즉시 반응하지 않는다.</strong> Boot/warm-up 동안 admission control이 필요하다.</li>
+            <li><strong>Fallback도 dependency와 capacity를 가진다.</strong> 검증되지 않은 fallback은 새 cascade를 만든다.</li>
+            <li><strong>Rejected work를 숨기지 않는다.</strong> 보호 성공과 사용자 영향 모두 metric에 남긴다.</li>
+          </ul>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">9. 대기업 기술 면접 질문</h2>
+          <ol style="padding-left:22px;">
+            <li><strong>“DB pool을 몇 개로 설정하겠습니까?”</strong><br>좋은 답변 구조: DB usable max·instance max·failover reserve → query service time·target RPS → Little’s Law → per-instance budget → acquire timeout·queue bound → load test·metric·rollback.</li>
+            <li><strong>“Circuit breaker와 rate limiter의 차이와 결합 순서는?”</strong><br>좋은 답변 구조: health-driven state machine vs identity/time quota → cheap admission first → bulkhead/queue → circuit/pool → 429/503 semantics → retry interaction → distributed state trade-off.</li>
+            <li><strong>“Overload 시 queue를 늘릴까요, fail-fast할까요?”</strong><br>좋은 답변 구조: burst인지 지속 overload인지 → drain rate·oldest age·deadline 계산 → value/priority → bounded queue → load shedding → recovery/canary → 사용자 경험과 cost.</li>
+          </ol>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">10. 회상·확인 문제와 채점 기준</h2>
+          <h3 style="font-size:18px;color:#075985;">어제 내용 회상 3문제</h3>
+          <ol style="padding-left:22px;"><li>같은 idempotency key에 다른 payload를 왜 거부하는가?</li><li>Check-then-insert가 동시 duplicate를 막지 못하는 이유는?</li><li>Dedup TTL이 client retry window보다 짧으면 어떤 failure가 생기는가?</li></ol>
+          <p><strong>짧은 정답:</strong> ① 다른 의도를 기존 operation으로 오인하지 않기 위해서다. ② 두 request가 동시에 ABSENT를 읽을 수 있어 unique/conditional write가 필요하다. ③ 늦은 retry가 새 operation으로 실행돼 duplicate effect가 생긴다.</p>
+          <h3 style="font-size:18px;color:#075985;">오늘 내용 확인 3문제</h3>
+          <ol style="padding-left:22px;"><li>100 RPS, 평균 service time 200ms의 평균 in-flight는?</li><li>Queue length보다 oldest age가 중요한 이유는?</li><li>OPEN breaker가 HALF_OPEN으로 갈 때 probe를 제한하는 이유는?</li></ol>
+          <p><strong>짧은 정답:</strong> ① Little’s Law로 <code>100×0.2=20</code>이다. ② Deadline을 이미 소진한 stale work인지 직접 보여주기 때문이다. ③ 회복 중인 dependency를 대기 요청이 다시 flood하지 않게 하기 위해서다. 문항당 정의 1점, 수치·내부 흐름 1점, failure·trade-off 1점으로 총 9점이다.</p>
+
+          <h2 style="font-size:22px;color:#082f49;border-bottom:2px solid #dbe8ec;padding-bottom:8px;margin:32px 0 14px;">11. 공식 자료</h2>
+          <ul style="padding-left:22px;overflow-wrap:anywhere;">
+            <li><a href="https://learn.microsoft.com/azure/architecture/patterns/bulkhead" style="color:#0369a1;">Microsoft Azure Architecture Center · Bulkhead pattern</a></li>
+            <li><a href="https://learn.microsoft.com/azure/architecture/patterns/circuit-breaker" style="color:#0369a1;">Microsoft Azure Architecture Center · Circuit Breaker pattern</a></li>
+            <li><a href="https://learn.microsoft.com/azure/architecture/patterns/throttling" style="color:#0369a1;">Microsoft Azure Architecture Center · Throttling pattern</a></li>
+            <li><a href="https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/circuit_breaking" style="color:#0369a1;">Envoy 공식 문서 · connections, pending requests, active requests, retries circuit breaking</a></li>
+          </ul>
+          <div style="margin-top:30px;background:#082f49;color:#fff;padding:18px;border-radius:10px;">
+            <strong style="color:#7dd3fc;">내일 예고 · Day 41</strong><br>
+            <span>랩: retry storm와 cascading failure — slow downstream, queue, timeout, retry가 positive feedback loop를 만드는 과정을 계측하고 안전하게 끊습니다.</span>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

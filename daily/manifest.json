@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-10-18T09:17:34+09:00",
+  "updatedAt": "2026-10-19T09:23:10+09:00",
   "lessons": [
     {
       "day": 1,
@@ -356,6 +356,15 @@
       "path": "day-39.html",
       "kind": "lesson",
       "publishedAt": "2026-10-18T09:17:34+09:00"
+    },
+    {
+      "day": 40,
+      "week": 6,
+      "title": "pool, queue, bulkhead, circuit breaker, rate limit",
+      "summary": "Pool·bounded queue·bulkhead·circuit breaker·rate limit을 capacity와 deadline 관점에서 연결해 overload와 cascading failure를 admission 단계에서 제어합니다.",
+      "path": "day-40.html",
+      "kind": "lesson",
+      "publishedAt": "2026-10-19T09:23:10+09:00"
     }
   ]
 }
