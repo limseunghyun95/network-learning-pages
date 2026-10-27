@@ -4,7 +4,7 @@
   "tagline": "packet path에서 cloud·incident response까지",
   "accent": "#38bdf8",
   "totalDays": 63,
-  "updatedAt": "2026-10-19T09:23:10+09:00",
+  "updatedAt": "2026-10-28T01:28:06+09:00",
   "lessons": [
     {
       "day": 1,
@@ -365,6 +365,15 @@
       "path": "day-40.html",
       "kind": "lesson",
       "publishedAt": "2026-10-19T09:23:10+09:00"
+    },
+    {
+      "day": 41,
+      "week": 6,
+      "title": "랩: retry storm와 cascading failure",
+      "summary": "Retry storm의 양의 피드백과 계층별 호출 증폭을 재현하고 retry budget·jitter·load shedding·점진 복구로 cascading failure를 차단합니다.",
+      "path": "day-41.html",
+      "kind": "lab",
+      "publishedAt": "2026-10-28T01:28:06+09:00"
     }
   ]
 }

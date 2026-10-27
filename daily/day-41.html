@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Network 심화 커리큘럼 Day 41 - retry storm와 cascading failure</title>
+</head>
+<body style="margin:0;background:#f4f7fb;color:#172033;font-family:Arial,'Apple SD Gothic Neo','Noto Sans KR',sans-serif;font-size:16px;line-height:1.72;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f4f7fb;">
+    <tr><td align="center" style="padding:24px 10px;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #dce3ed;border-radius:14px;">
+        <tr><td style="padding:28px 24px 18px;background:#11284b;color:#ffffff;border-radius:14px 14px 0 0;">
+          <div style="font-size:14px;letter-spacing:.05em;color:#b8d2ff;">WEEK 6 · DAY 41 · 통합 LAB · 예상 40분</div>
+          <h1 style="margin:8px 0 6px;font-size:27px;line-height:1.35;">랩: retry storm와 cascading failure</h1>
+          <p style="margin:0;color:#e5eeff;">실패를 견디려는 재시도가 어떻게 시스템 전체의 실패를 증폭하는지 재현하고, retry budget·jitter·load shedding으로 끊어냅니다.</p>
+        </td></tr>
+        <tr><td style="padding:22px 24px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#edf5ff;border-left:5px solid #2868c7;">
+            <tr><td style="padding:14px 16px;"><strong>한 줄 요약</strong><br>재시도는 성공 가능성을 높이는 공짜 기능이 아니라, 남은 deadline과 전체 retry budget 안에서만 허용해야 하는 추가 부하입니다.</td></tr>
+          </table>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">1. 선수 용어 사전</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+            <tr><td style="width:28%;padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">Retry storm</td><td style="padding:10px;border:1px solid #dce3ed;">장애로 실패가 늘자 많은 요청이 동시에 재시도하여, 이미 느린 하위 시스템에 더 큰 부하를 만드는 현상입니다. 불난 식당에 주문을 반복 접수하는 것과 같습니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">Cascading failure</td><td style="padding:10px;border:1px solid #dce3ed;">한 구성요소의 지연·고장이 queue, thread, connection pool 같은 공유 자원을 고갈시켜 정상 구성요소까지 연쇄적으로 실패하는 현상입니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">Amplification factor</td><td style="padding:10px;border:1px solid #dce3ed;">논리 요청 1개가 실제 하위 호출 몇 개를 만드는지 나타내는 증폭 배수입니다. 10개 요청이 총 30번 호출되면 3배입니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">Positive feedback</td><td style="padding:10px;border:1px solid #dce3ed;">출력 변화가 다시 입력을 같은 방향으로 키우는 양의 피드백입니다. 지연 증가 → timeout → retry → 부하 증가 → 더 큰 지연이 대표적입니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">Offered / admitted load</td><td style="padding:10px;border:1px solid #dce3ed;">들어오려고 한 전체 부하가 offered load, 용량 검사 후 실제 처리기로 들인 부하가 admitted load입니다. 둘의 차이는 의도적으로 거절한 load shedding입니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">Retry budget</td><td style="padding:10px;border:1px solid #dce3ed;">개별 요청의 최대 횟수와 별개로, 일정 창에서 최초 호출 대비 재시도가 차지할 수 있는 비율·토큰의 상한입니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">Load shedding</td><td style="padding:10px;border:1px solid #dce3ed;">용량을 초과한 요청을 queue에 무한 적재하지 않고 빠르게 429/503 등으로 거절해 핵심 작업의 생존성을 지키는 admission control입니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">Coordinated omission</td><td style="padding:10px;border:1px solid #dce3ed;">응답을 기다리는 동안 새 요청을 보내지 않는 부하 도구가, 실제로는 도착했어야 할 요청과 그 지연을 측정에서 누락해 장애를 좋게 보이게 하는 오류입니다.</td></tr>
+          </table>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">2. 왜 중요한가</h2>
+          <p>정상 시 재시도는 작은 일시 장애를 감춥니다. 그러나 saturation, 즉 CPU·worker·queue·pool 중 하나가 한계에 닿은 상황에서는 성공하지 못할 일을 복제합니다. 호출자는 timeout을 받았지만 서버 작업은 cancellation을 못 받아 계속 실행할 수도 있습니다. 이때 사용자에게는 한 번의 실패처럼 보여도 서버에는 여러 개의 살아 있는 작업이 남습니다.</p>
+          <p><strong>핵심 질문은 “몇 번 재시도할까?”가 아닙니다.</strong> 누가 재시도를 소유하는가, 하위 작업이 정말 종료됐는가, 전체 시스템이 감당할 추가 호출량은 얼마인가, 복구 중 probe를 몇 개만 허용할 것인가를 함께 결정해야 합니다.</p>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">3. 아키텍처 그림과 요청 흐름</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f7f9fc;border:1px solid #dce3ed;table-layout:fixed;">
+            <tr><td style="padding:12px;text-align:center;background:#dbeafe;font-weight:bold;">① 사용자<br>10 logical requests</td></tr>
+            <tr><td style="padding:5px;text-align:center;color:#2868c7;">↓ deadline·request ID</td></tr>
+            <tr><td style="padding:12px;text-align:center;background:#e8f5e9;font-weight:bold;">② Service A<br>retry owner + budget</td></tr>
+            <tr><td style="padding:5px;text-align:center;color:#2868c7;">↓ attempt 1 / 2 / 3</td></tr>
+            <tr><td style="padding:12px;text-align:center;background:#fff3cd;font-weight:bold;">③ Proxy / LB<br>queue·connection pool·숨은 retry</td></tr>
+            <tr><td style="padding:5px;text-align:center;color:#2868c7;">↓ socket·packet·timestamp</td></tr>
+            <tr><td style="padding:12px;text-align:center;background:#fde2e2;font-weight:bold;">④ Service B<br>bounded worker queue</td></tr>
+            <tr><td style="padding:10px;text-align:center;color:#8b1e1e;">B 지연 ↑ → queue 대기 ↑ → timeout ↑ → retry ↑ → offered load ↑ → B 지연 ↑</td></tr>
+            <tr><td style="padding:12px;text-align:center;background:#e7dcff;font-weight:bold;">⑤ 차단점<br>retry budget + jitter + load shedding + circuit breaker</td></tr>
+          </table>
+          <ol style="padding-left:22px;">
+            <li><strong>t0:</strong> 최초 logical request가 하나의 end-to-end deadline과 고유 request ID를 갖습니다.</li>
+            <li><strong>t1:</strong> Service A가 attempt 1을 보냅니다. 이때 proxy나 SDK가 자동 retry를 하는지 inventory에 포함해야 합니다.</li>
+            <li><strong>t2:</strong> B의 worker가 포화되어 socket accept 이후에도 queue에서 기다립니다. packet 전달 성공은 업무 성공 확정이 아닙니다.</li>
+            <li><strong>t3:</strong> A의 timeout이 먼저 끝납니다. B가 cancellation을 관찰하지 못하면 attempt 1은 계속 실행 중인데 attempt 2가 추가됩니다.</li>
+            <li><strong>t4:</strong> 많은 client가 같은 timeout과 backoff를 쓰면 같은 시점에 깨어납니다. jitter가 없으면 재시도 파동이 동기화됩니다.</li>
+            <li><strong>t5:</strong> retry budget을 소진하거나 admitted load가 용량을 넘으면 재시도를 멈추고 429/503으로 빠르게 실패시킵니다. 이 거절이 연쇄 실패보다 싸야 합니다.</li>
+            <li><strong>t6:</strong> 복구 중에는 소수 probe만 half-open 상태로 통과시킵니다. 한꺼번에 모든 요청을 풀면 recovery storm이 재발합니다.</li>
+          </ol>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">4. CS 내부 동작</h2>
+          <h3 style="font-size:18px;margin:16px 0 6px;">호출 증폭은 곱셈이다</h3>
+          <p>세 계층이 각각 “최초 1회 + retry 2회”, 즉 최대 3 attempts를 독립적으로 수행하면 최악의 하위 호출은 <strong>3 × 3 × 3 = 27회</strong>입니다. 각 계층의 설정만 보면 2회 재시도라 작아 보이지만, end-to-end에서는 곱해집니다. 따라서 재시도 소유자는 가능하면 경계 한 곳으로 제한합니다.</p>
+          <h3 style="font-size:18px;margin:16px 0 6px;">Little’s Law와 queue 폭발</h3>
+          <p>안정 상태에서 평균 동시 작업 수 L은 도착률 λ와 평균 체류 시간 W의 곱인 <strong>L = λW</strong>입니다. 초당 100개가 오고 100ms 머물면 평균 10개지만, 장애로 2초가 되면 200개가 됩니다. 여기에 retry로 λ까지 커지면 worker와 connection pool이 함께 고갈됩니다. 무한 queue는 처리량을 늘리지 않고 deadline이 지난 작업만 축적합니다.</p>
+          <h3 style="font-size:18px;margin:16px 0 6px;">Backoff와 jitter</h3>
+          <p>Exponential backoff는 시도 간격을 늘리지만, 모든 client가 같은 계산을 하면 여전히 동시에 깨어납니다. Full jitter는 0부터 cap까지 무작위로 기다려 위상을 흩뜨립니다. 다만 jitter는 평균 부하를 없애지 않습니다. retry budget과 admission control이 상한을 만들고, jitter는 시간축의 봉우리를 낮춥니다.</p>
+          <h3 style="font-size:18px;margin:16px 0 6px;">성공과 실패가 확정되는 시점</h3>
+          <p>TCP reset이나 timeout은 결과를 모른다는 뜻일 수 있습니다. 서버가 commit한 뒤 응답만 유실되면 무작정 retry가 duplicate side effect를 만듭니다. 읽기·멱등 작업, idempotency key로 중복 제거되는 쓰기, commit 전 실패임을 증명할 수 있는 경우만 retry eligible로 봅니다.</p>
+          <h3 style="font-size:18px;margin:16px 0 6px;">측정의 함정</h3>
+          <p>Closed-loop 부하 생성기는 응답이 늦을수록 새 요청도 늦게 보내므로 offered load가 저절로 줄어듭니다. 실제 사용자 도착을 재현하려면 고정 도착률 또는 open-loop 측정과 함께, 최초 요청 수·총 attempts·in-flight·queue time·shed 수를 분리해야 합니다.</p>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">5. 실무 설계 판단</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#11284b;color:#fff;font-weight:bold;">판단</td><td style="padding:10px;border:1px solid #dce3ed;background:#11284b;color:#fff;font-weight:bold;">Best practice와 이유</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;">소유권</td><td style="padding:10px;border:1px solid #dce3ed;">Client·gateway·service·SDK 중 한 계층을 retry owner로 정하고 나머지는 비활성화하거나 총 attempt budget에 포함합니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;">상한</td><td style="padding:10px;border:1px solid #dce3ed;">per-request max attempts뿐 아니라 최근 최초 호출 대비 retry 비율/토큰을 제한합니다. 정상 traffic이 없으면 retry도 무한 생성되지 않아야 합니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;">시간</td><td style="padding:10px;border:1px solid #dce3ed;">각 attempt 전에 남은 end-to-end deadline이 connect + 처리 + 응답 여유보다 큰지 확인합니다. deadline을 넘길 retry는 시작하지 않습니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;">Admission</td><td style="padding:10px;border:1px solid #dce3ed;">Queue는 bounded로 두고, 우선순위·tenant·업무 중요도별 concurrency limit을 둡니다. 거절 응답에는 Retry-After를 쓸 수 있지만 client가 이를 존중하는지 검증합니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;">복구</td><td style="padding:10px;border:1px solid #dce3ed;">Circuit breaker half-open에서는 소수 probe만 보내고 점진적으로 허용량을 늘립니다. cache·fallback은 stale data와 보안 경계를 명시합니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;">관측</td><td style="padding:10px;border:1px solid #dce3ed;">logical_requests, attempts, retries, retry_budget_denied, shed, queue_wait, in_flight, deadline_remaining을 같은 request ID와 attempt 번호로 연결합니다.</td></tr>
+          </table>
+          <p><strong>버전·엔진 차이:</strong> Envoy, cloud LB, 언어 SDK마다 retry 대상 status, per-try timeout, budget 계산, circuit breaker 기본값이 다릅니다. 문서의 최신 버전과 실제 배포 설정 dump를 함께 확인하고 “기본값일 것”이라 추정하지 마세요.</p>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">6. 장애 대응 표</h2>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;table-layout:fixed;">
+            <tr><td style="width:28%;padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">증상</td><td style="padding:10px;border:1px solid #dce3ed;">오류율과 p99가 함께 상승하고, RPS가 실제 사용자 수보다 빠르게 증가하며, 하위 서비스가 회복해도 queue가 오래 줄지 않습니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">먼저 수집할 증거/지표</td><td style="padding:10px;border:1px solid #dce3ed;">logical request 대비 total attempts, 계층별 retry count, retry reason, in-flight, queue depth/wait, pool 사용률, timeout 단계, shed 수, CPU가 아닌 saturation 신호를 타임라인으로 수집합니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">가능한 가설</td><td style="padding:10px;border:1px solid #dce3ed;">다중 계층 retry, timeout보다 긴 서버 작업, jitter 없는 동기화, 무한 queue, 실패 응답까지 retry, half-open probe 폭주, tenant 간 bulkhead 부재를 세웁니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">안전한 첫 조치</td><td style="padding:10px;border:1px solid #dce3ed;">가장 바깥 retry를 일시 제한하고 신규 저우선순위 요청을 shed합니다. circuit을 열고 소수 probe만 허용하되, 핵심 읽기 경로와 관리 plane은 별도 보호합니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">rollback/복구</td><td style="padding:10px;border:1px solid #dce3ed;">변경 전 retry·timeout·concurrency 설정을 보존하고 즉시 되돌릴 수 있게 합니다. queue와 in-flight가 안정화된 뒤 5%→20%→50%처럼 점진적으로 traffic을 복구합니다.</td></tr>
+            <tr><td style="padding:10px;border:1px solid #dce3ed;background:#f7f9fc;font-weight:bold;">하지 말아야 할 조치</td><td style="padding:10px;border:1px solid #dce3ed;">원인 확인 없이 timeout·queue·retry 횟수를 동시에 늘리거나, 모든 client를 한 번에 재시작하거나, 실패 중인 DB에 수동 재실행을 쏟지 않습니다.</td></tr>
+          </table>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">7. 40분 통합 실습: 폭풍을 만들고 예산으로 끊기</h2>
+          <p><strong>사전 조건:</strong> Docker Desktop이 실행 중이고 저장소 루트에서 명령을 수행합니다. 실습은 로컬 컨테이너에만 부하를 줍니다. 먼저 “10 logical requests, 3 attempts면 upstream 호출은 몇 회인가?”를 답한 뒤 실행하세요.</p>
+          <p><strong>0~8분 — 기동과 readiness</strong></p>
+          <pre style="margin:8px 0;padding:12px;background:#111827;color:#f8fafc;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;border-radius:8px;font-size:14px;">cd labs/basic-network-observability
+make doctor
+make up
+for n in $(seq 1 20); do
+  docker compose exec -T client curl -fsS -o /dev/null http://proxy:8080/api/health &amp;&amp; break
+  sleep 1
+done
+make ps</pre>
+          <p><strong>예상:</strong> proxy와 api가 healthy이고 client에서 health 요청이 성공합니다. 연결 거부면 컨테이너 로그를 확인하고 readiness loop를 다시 실행하세요.</p>
+          <p><strong>8~18분 — 실패 주입: immediate retry storm</strong></p>
+          <pre style="margin:8px 0;padding:12px;background:#111827;color:#f8fafc;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;border-radius:8px;font-size:14px;">docker compose exec -T client python - &lt;&lt;'PY'
+import urllib.error, urllib.request
+logical = attempts = 0
+for request_id in range(10):
+    logical += 1
+    for attempt in range(1, 4):
+        attempts += 1
+        try:
+            urllib.request.urlopen(
+                "http://proxy:8080/api/status/503",
+                timeout=1,
+            ).read()
+            break
+        except urllib.error.HTTPError as exc:
+            print(request_id, attempt, exc.code)
+print({"logical": logical, "attempts": attempts,
+       "amplification": attempts / logical})
+PY</pre>
+          <p><strong>예상:</strong> logical=10, attempts=30, amplification=3.0입니다. 503이 즉시 오는데도 재시도하면 실패를 3배로 복제합니다.</p>
+          <p><strong>18~30분 — 보호 적용: shared retry budget + full jitter</strong></p>
+          <pre style="margin:8px 0;padding:12px;background:#111827;color:#f8fafc;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;border-radius:8px;font-size:14px;">docker compose exec -T client python - &lt;&lt;'PY'
+import random, time, urllib.error, urllib.request
+logical = attempts = retries = budget_denied = 0
+retry_tokens = 4
+for request_id in range(10):
+    logical += 1
+    for attempt in range(1, 3):
+        attempts += 1
+        try:
+            urllib.request.urlopen(
+                "http://proxy:8080/api/status/503",
+                timeout=1,
+            ).read()
+            break
+        except urllib.error.HTTPError:
+            if attempt == 2:
+                break
+            if retry_tokens == 0:
+                budget_denied += 1
+                break
+            retry_tokens -= 1
+            retries += 1
+            time.sleep(random.uniform(0, 0.2))
+print({"logical": logical, "attempts": attempts,
+       "retries": retries, "budget_denied": budget_denied})
+PY</pre>
+          <p><strong>예상:</strong> 최초 10회 + 허용 retry 4회로 attempts는 최대 14입니다. per-request max=2만으로는 최대 20회지만, aggregate budget이 전체 증폭을 더 강하게 제한합니다.</p>
+          <p><strong>30~36분 — timeout 뒤 살아 있는 작업 관찰</strong></p>
+          <pre style="margin:8px 0;padding:12px;background:#111827;color:#f8fafc;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;border-radius:8px;font-size:14px;">time docker compose exec -T client sh -c '
+  curl -sS --max-time 0.15 \
+  http://proxy:8080/api/slow?seconds=0.4 || true
+'
+docker compose logs --since=2m --timestamps proxy api</pre>
+          <p><strong>관찰:</strong> client는 약 150ms에 포기해도 server 로그에는 요청 처리 흔적이 더 늦게 남을 수 있습니다. 바로 retry했다면 이전 작업과 새 작업이 겹쳤을 것입니다. 로그 형식은 runtime 버전에 따라 다르므로 request timestamp와 응답 완료 시점을 비교하세요.</p>
+          <p><strong>자주 나는 오류와 해결:</strong> 포트 충돌은 기존 compose stack을 확인하고, health 실패는 <code style="word-break:break-word;">docker compose logs proxy api</code>로 readiness를 확인합니다. Python에서 503은 예외가 정상 관찰 결과입니다. Docker daemon 오류면 Desktop을 시작한 뒤 재시도합니다.</p>
+          <p><strong>36~40분 — cleanup</strong></p>
+          <pre style="margin:8px 0;padding:12px;background:#111827;color:#f8fafc;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;border-radius:8px;font-size:14px;">make down</pre>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">8. 놓치기 쉬운 함정</h2>
+          <ul style="padding-left:22px;">
+            <li><strong>SDK의 숨은 retry:</strong> 애플리케이션 코드만 세어서는 부족합니다. DNS, proxy, service mesh, cloud SDK 설정까지 계층별로 목록화하세요.</li>
+            <li><strong>Retry-After 맹신:</strong> 모든 client가 존중하지 않으며, 같은 값은 동기화를 만들 수 있습니다. jitter와 server-side admission이 함께 필요합니다.</li>
+            <li><strong>Timeout 증가:</strong> 짧은 timeout 오탐을 줄일 수 있지만 in-flight와 queue 점유 시간을 키웁니다. percentile만 보고 일괄 확대하지 마세요.</li>
+            <li><strong>성공률 착시:</strong> attempt 성공률이 아니라 logical operation 성공률, 최종 latency, 추가 부하 비용을 함께 봅니다.</li>
+            <li><strong>복구 시 재폭주:</strong> circuit이 닫히는 순간 대기 요청을 전부 풀면 두 번째 장애가 납니다. 점진 복구와 retry token 재충전 속도를 제한하세요.</li>
+          </ul>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">9. 대기업 면접 질문 3개</h2>
+          <p><strong>Q1. Retry storm를 방지하는 정책을 설계해보세요.</strong><br>좋은 답변 구조: 목표 SLO와 traffic 수치 → retry eligible 조건 → 단일 owner → deadline/per-try timeout → exponential backoff + jitter → aggregate budget → shed/circuit → 지표와 rollback 순서입니다.</p>
+          <p><strong>Q2. CPU는 40%인데 p99와 timeout이 폭증했습니다. 왜 가능한가요?</strong><br>좋은 답변 구조: CPU 외의 connection pool·thread·queue·DB lock·downstream saturation 가설 → Little’s Law → timeout 후 orphan work → attempts/logical ratio와 queue wait 증거 → 안전한 admission 제한 순서입니다.</p>
+          <p><strong>Q3. 각 서비스가 최대 2회 retry하면 안전하지 않나요?</strong><br>좋은 답변 구조: “2회 retry=3 attempts” 명확화 → 3계층이면 최악 27회 계산 → 숨은 proxy/SDK retry → 중복 side effect·deadline 비용 → 경계 한 곳 소유 + shared budget 대안까지 방어합니다.</p>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">10. 회상·확인 문제와 정답</h2>
+          <p><strong>어제 내용 회상</strong></p>
+          <ol style="padding-left:22px;">
+            <li>Bounded queue가 처리량을 늘리지 않는데도 중요한 이유는?</li>
+            <li>Bulkhead와 circuit breaker가 보호하는 실패 범위는 어떻게 다른가?</li>
+            <li>Rate limit과 concurrency limit을 함께 써야 하는 경우는?</li>
+          </ol>
+          <p><strong>회상 정답:</strong> ① deadline 지난 작업의 무한 축적을 막고 overload를 명시적으로 거절한다. ② bulkhead는 자원 격리, circuit breaker는 실패 중인 의존성 호출 차단이다. ③ 짧은 burst의 도착률과 느린 요청의 동시 점유를 각각 제한해야 할 때다.</p>
+          <p><strong>오늘 내용 확인</strong></p>
+          <ol style="padding-left:22px;">
+            <li>3개 계층이 각각 최대 3 attempts를 하면 최악의 최하위 호출 수는?</li>
+            <li>Full jitter만으로 retry storm을 막을 수 없는 이유는?</li>
+            <li>장애 복구 직후 circuit을 한 번에 닫으면 위험한 이유는?</li>
+          </ol>
+          <p><strong>정답·채점 기준:</strong> ① 27회이며 계층별 attempt 수가 곱해짐을 설명하면 정답. ② 호출 총량 상한이 없어 시간만 분산하므로 retry budget/admission이 필요하다고 말하면 정답. ③ 대기·retry 요청이 동시에 유입돼 recovery storm이 발생하므로 half-open probe와 점진 허용이 필요하다고 답하면 정답입니다.</p>
+
+          <h2 style="margin:28px 0 12px;font-size:21px;color:#11284b;">11. 공식 자료와 내일 예고</h2>
+          <ul style="padding-left:22px;word-break:break-word;overflow-wrap:anywhere;">
+            <li><a href="https://learn.microsoft.com/en-us/azure/architecture/antipatterns/retry-storm/" style="color:#1d5fbf;">Microsoft Azure Architecture Center — Retry Storm antipattern</a></li>
+            <li><a href="https://learn.microsoft.com/en-us/azure/architecture/best-practices/transient-faults" style="color:#1d5fbf;">Microsoft Azure — Transient fault handling</a></li>
+            <li><a href="https://www.envoyproxy.io/docs/envoy/latest/faq/load_balancing/transient_failures.html" style="color:#1d5fbf;">Envoy — Handling transient failures</a></li>
+            <li><a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/resilience-analysis-framework/mitigation-strategies.html" style="color:#1d5fbf;">AWS Prescriptive Guidance — Mitigation strategies</a></li>
+          </ul>
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background:#f2edff;border-left:5px solid #6c43bd;">
+            <tr><td style="padding:14px 16px;"><strong>내일 Day 42</strong><br>회상: retry budget·load shedding 정책 — 이번 주의 deadline, cancellation, retry, idempotency, 보호 장치를 하나의 운영 정책으로 설명합니다.</td></tr>
+          </table>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
